@@ -1,0 +1,48 @@
+HELP.md
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+
+### nginx 运行时产物(前端目录) ###
+frontend/nginx-1.18.0/logs/
+frontend/nginx-1.18.0/temp/
+*.pid
+
+### 用户上传的图片(运行时生成,不入库) ###
+frontend/nginx-1.18.0/html/hmdp/imgs/blogs/
+
+### Docker 数据卷 / 本地环境产物 ###
+deploy/**/data/
+
+### 系统文件 ###
+.DS_Store
+Thumbs.db

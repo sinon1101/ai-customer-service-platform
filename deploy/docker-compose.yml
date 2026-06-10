@@ -1,0 +1,112 @@
+# AI 智能客服平台 — 本地开发环境一键编排
+#
+# 用法(在 deploy/ 目录下):
+#   docker compose up -d        # 拉起全部中间件
+#   docker compose ps           # 查看状态
+#   docker compose logs -f xxx  # 看某个服务日志
+#   docker compose down         # 停止并移除容器(数据卷保留)
+#   docker compose down -v      # 连数据卷一起删(彻底清空)
+#
+# 约定:后端应用跑在【宿主机】(mvn spring-boot:run),所有中间件在 Docker。
+#       因此 RocketMQ broker 对外广播 127.0.0.1,宿主机 app 才能连上。
+#
+# 端口一览(宿主机侧,已避开本机/WSL/其他容器的占用):
+#   MySQL            3308  (本机已有 3306,另一个容器占了 3307)
+#   Redis Stack      6381  (本机/WSL 已有 6379)  (RedisInsight 可视化 8001)
+#   RocketMQ NameServer 9876
+#   RocketMQ Broker  10909 / 10911 / 10912
+#   RocketMQ Dashboard  http://localhost:8089
+#
+# 注意:nginx 前端用了 8080,Dashboard 故意避开,用 8089。
+
+services:
+  # ───────────────────────── MySQL ─────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: aics-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: "ai_customer_service"
+      TZ: Asia/Shanghai
+    ports:
+      - "3308:3306"   # 宿主机 3308 → 容器 3306(避开本机 3306 / 另一容器 3307)
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 把建表脚本放进 mysql/init/ 下,首次启动会自动执行
+      - ./mysql/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────── Redis Stack(缓存 + 向量库)───────────────────
+  redis:
+    image: redis/redis-stack:latest
+    container_name: aics-redis
+    restart: unless-stopped
+    ports:
+      - "6381:6379"   # 宿主机 6381 → 容器 6379(避开本机/WSL 的 6379)
+      - "8001:8001"   # RedisInsight 可视化界面
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────── RocketMQ NameServer ───────────────────
+  rmq-namesrv:
+    image: apache/rocketmq:5.3.0
+    container_name: aics-rmq-namesrv
+    restart: unless-stopped
+    ports:
+      - "9876:9876"
+    environment:
+      # 限制堆内存,默认会想要很大的堆,本地开发用不上
+      JAVA_OPT_EXT: "-server -Xms256m -Xmx256m -Xmn128m"
+    command: sh mqnamesrv
+
+  # ─────────────────── RocketMQ Broker ───────────────────
+  rmq-broker:
+    image: apache/rocketmq:5.3.0
+    container_name: aics-rmq-broker
+    restart: unless-stopped
+    # 以 root 运行:镜像内进程默认是 uid 3000,无法写入 root 属主的命名卷(store),
+    # 会导致 store 加载失败、broker 崩溃重启。本地开发用 root 最省事。
+    user: root
+    depends_on:
+      - rmq-namesrv
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+      - "10912:10912"
+    environment:
+      JAVA_OPT_EXT: "-server -Xms512m -Xmx512m -Xmn256m"
+    volumes:
+      - ./rocketmq/broker.conf:/home/rocketmq/rocketmq-5.3.0/conf/broker.conf
+      - rmq-broker-store:/home/rocketmq/store
+    command: sh mqbroker -c /home/rocketmq/rocketmq-5.3.0/conf/broker.conf -n rmq-namesrv:9876
+
+  # ─────────────────── RocketMQ Dashboard(控制台)───────────────────
+  rmq-dashboard:
+    image: apacherocketmq/rocketmq-dashboard:latest
+    container_name: aics-rmq-dashboard
+    restart: unless-stopped
+    depends_on:
+      - rmq-namesrv
+    ports:
+      - "8089:8080"   # 浏览器访问 http://localhost:8089
+    environment:
+      JAVA_OPTS: "-Drocketmq.namesrv.addr=rmq-namesrv:9876"
+
+volumes:
+  mysql-data:
+  redis-data:
+  rmq-broker-store:
