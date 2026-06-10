@@ -19,11 +19,12 @@ import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
 import org.apache.ibatis.javassist.scopedpool.ScopedClassPool;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
-import javax.annotation.Resource;
+import jakarta.annotation.Resource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -41,6 +42,7 @@ import java.util.stream.Collectors;
 public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IBlogService {
 
     @Resource
+    @Lazy // Spring Boot 3 默认禁止循环依赖,自注入代理需延迟加载打断环
     private IBlogService blogService;
     @Resource
     private IUserService userService;
