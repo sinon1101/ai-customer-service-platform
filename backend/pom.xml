@@ -18,6 +18,7 @@
         <mybatis-plus.version>3.5.9</mybatis-plus.version>
         <redisson.version>3.34.1</redisson.version>
         <hutool.version>5.8.32</hutool.version>
+        <spring-ai-alibaba.version>1.0.0.2</spring-ai-alibaba.version>
     </properties>
     <dependencies>
         <!-- Redis(Boot 3 BOM 统一管理 lettuce / spring-data-redis 版本) -->
@@ -77,6 +78,12 @@
             <groupId>org.redisson</groupId>
             <artifactId>redisson</artifactId>
             <version>${redisson.version}</version>
+        </dependency>
+        <!-- Spring AI Alibaba(百炼 DashScope),1.0.0.2 基于 Spring AI 1.0 GA,配 Boot 3.4 -->
+        <dependency>
+            <groupId>com.alibaba.cloud.ai</groupId>
+            <artifactId>spring-ai-alibaba-starter-dashscope</artifactId>
+            <version>${spring-ai-alibaba.version}</version>
         </dependency>
     </dependencies>
 

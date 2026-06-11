@@ -20,6 +20,14 @@ spring:
           time-between-eviction-runs: 10s
   jackson:
     default-property-inclusion: non_null # JSON处理时忽略非空字段
+  ai:
+    dashscope:
+      # API Key 取自系统环境变量 API-KEY(百炼控制台获取)
+      api-key: ${API-KEY}
+      chat:
+        options:
+          # 模型名,后续可在此切换(qwen-plus / qwen-turbo / qwen-max ...)
+          model: qwen-plus
 mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包
 logging:
