@@ -28,6 +28,13 @@ spring:
         options:
           # 模型名,后续可在此切换(qwen-plus / qwen-turbo / qwen-max ...)
           model: qwen-plus
+      embedding:
+        options:
+          # 文本向量模型(默认 1024 维),RedisVectorStore 自动据此建索引
+          model: text-embedding-v3
+# RocketMQ 原生客户端连接(producer/consumer 手写 bean,见 RocketMQConfig / DocIngestConsumer)
+rocketmq:
+  name-server: 127.0.0.1:9876
 mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包
 logging:

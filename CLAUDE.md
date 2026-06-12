@@ -8,7 +8,7 @@ This repo (local dir still named `hm-dianping`) has been **transformed** from th
 
 - **Design blueprint**: `AI智能客服平台-改造设计方案.md` (repo root).
 - **Cross-session entry point**: `项目进度.md` (repo root) — current milestone, next steps, env connection info, **changelog (append one entry per meaningful change; read this first when starting a session)**.
-- **Status**: M0 (env) and **M1 (skeleton) complete** — framework upgraded to Spring Boot 3.4.5 / Java 21; multi-tenant model + tenant-aware auth + tenant/knowledge-base CRUD + a minimal Spring AI `/chat` to 百炼. Next is **M2** (knowledge-base ingestion pipeline).
+- **Status**: M0 (env), **M1 (skeleton), and M2 (knowledge-base ingestion pipeline) complete** — Spring Boot 3.4.5 / Java 21; multi-tenant model + tenant-aware auth + tenant/knowledge-base CRUD + minimal Spring AI `/chat` to 百炼; plus an async ingestion pipeline (upload → RocketMQ → chunk + embed → RediSearch vector index). Next is **M3** (RAG: vector recall + LLM + SSE streaming).
 
 > **Legacy note**: the original dianping business code (shop/blog/voucher/follow/user controllers & services) still exists and compiles, but is **inactive** — its tables are not in the new DB and its endpoints sit behind the new auth gate. Treat it as reference/infrastructure, not live functionality. The `frontend/` nginx SPA is likewise the old dianping UI, not yet adapted to the new APIs.
 
@@ -58,17 +58,27 @@ docker compose up -d mysql redis   # just DB + Redis (enough for most backend wo
 Spring Boot 3.4.5 / Java 21, layered under `com.hmdp` (jakarta.* namespace, MyBatis-Plus boot3 starter):
 
 - **auth/** — multi-tenant auth (the M1 rewrite). `UserContext` (ThreadLocal carrying `LoginUser` incl. `tenantId`, with `getTenantId()`), `RefreshTokenInterceptor` (order 0, all paths — loads token Hash into context, refreshes TTL), `LoginInterceptor` (order 1, protected paths — 401 if no context). Wired in `config/MvcConfig`; public paths: `/auth/login`, `/auth/register`.
-- **controller/** — new platform endpoints: `AuthController` (`/auth/register|login|me|logout`), `TenantController` (`/tenant/current`), `KnowledgeBaseController` (`/kb` CRUD), `ChatController` (`/chat`). Plus legacy dianping controllers (inactive).
-- **service/impl/** — business logic; most extend MyBatis-Plus `ServiceImpl`. New: `AuthServiceImpl`, `TenantServiceImpl`, `SysUserServiceImpl`, `KnowledgeBaseServiceImpl`, `ChatServiceImpl`.
-- **entity/** — new tenant-scoped entities `Tenant`, `SysUser`, `KnowledgeBase` (each carries `tenant_id` for logical isolation).
-- **dto/** — `Result` (unified response), `LoginUser` (auth payload), `RegisterFormDTO`, `AuthLoginFormDTO`, `KnowledgeBaseFormDTO`, `ChatRequestDTO`.
-- **config/** — `MvcConfig` (interceptor chain), `RedissonConfig` (single-node Redisson → 6381), `MybatisConfig` (pagination), `WebExceptionAdvice`.
+- **controller/** — new platform endpoints: `AuthController` (`/auth/register|login|me|logout`), `TenantController` (`/tenant/current`), `KnowledgeBaseController` (`/kb` CRUD + `/kb/{kbId}/documents` upload/list), `ChatController` (`/chat`). Plus legacy dianping controllers (inactive).
+- **service/impl/** — business logic; most extend MyBatis-Plus `ServiceImpl`. New: `AuthServiceImpl`, `TenantServiceImpl`, `SysUserServiceImpl`, `KnowledgeBaseServiceImpl`, `KbDocumentServiceImpl`, `ChatServiceImpl`.
+- **entity/** — new tenant-scoped entities `Tenant`, `SysUser`, `KnowledgeBase`, `KbDocument` (each carries `tenant_id` for logical isolation).
+- **mq/** — RocketMQ pipeline (M2): `DocIngestMessage` (payload `{tenantId,kbId,docId}`), `DocIngestConsumer` (self-managed `DefaultMQPushConsumer`, the chunk→embed→write-vector worker).
+- **constant/** — `IngestConstants` (RocketMQ topic/group, RediSearch index name `aics-kb-index` + key prefix `aics:kb:`).
+- **dto/** — `Result` (unified response), `LoginUser` (auth payload), `RegisterFormDTO`, `AuthLoginFormDTO`, `KnowledgeBaseFormDTO`, `DocUploadDTO`, `ChatRequestDTO`.
+- **config/** — `MvcConfig` (interceptor chain), `RedissonConfig` (single-node Redisson → 6381), `RocketMQConfig` (native `DefaultMQProducer` bean), `VectorStoreConfig` (dedicated `JedisPooled` + Spring AI `RedisVectorStore`), `MybatisConfig` (pagination), `WebExceptionAdvice`.
 
 ### Multi-tenancy (logical isolation)
 One deployment serves N tenants. Every business table carries `tenant_id`; login resolves the tenant from a globally-unique `username` and stores `tenantId` in the token Hash. Service layer **always filters by `UserContext.getTenantId()`** — cross-tenant access simply finds nothing (see `KnowledgeBaseServiceImpl.getOwned`). Redis keys use the tenant prefix helper `RedisConstants.tenantKey(tenantId, suffix)` → `t:{tenantId}:{suffix}`.
 
 ### AI (Spring AI + 百炼)
-`spring-ai-alibaba-starter-dashscope:1.0.0.2` (built on Spring AI 1.0 GA). `ChatServiceImpl` injects Spring AI `ChatClient` and calls `prompt().user(msg).call().content()`. Swapping models / adding RAG later won't change this call site.
+`spring-ai-alibaba-starter-dashscope:1.0.0.2` (built on Spring AI 1.0 GA). `ChatServiceImpl` injects Spring AI `ChatClient` and calls `prompt().user(msg).call().content()`. Swapping models / adding RAG later won't change this call site. Embedding via `text-embedding-v3` (1024-dim), configured under `spring.ai.dashscope.embedding`.
+
+### Knowledge-base ingestion pipeline (M2)
+Async pipeline so the slow/expensive embedding call never blocks the user request:
+- `POST /kb/{kbId}/documents` validates KB ownership → persists `kb_document` (status `PENDING`) → sends a RocketMQ message (`KB_DOC_INGEST` topic) → returns `docId` immediately.
+- `DocIngestConsumer` consumes: `PROCESSING` → `TokenTextSplitter` chunk → build Spring AI `Document` (metadata `tenantId`/`kbId`/`docId`/`docName`) → `vectorStore.add()` (embeds via 百炼 + writes RediSearch) → `COMPLETED` + chunk_count, `knowledge_base.doc_count++`. On failure: `FAILED` + `error_msg`, returns `RECONSUME_LATER` for RocketMQ retry/DLQ.
+- **RocketMQ** uses the **native `rocketmq-client` 5.x** with hand-written producer/consumer beans, deliberately *not* the official `rocketmq-spring-boot-starter` (javax / autoconfig friction on Boot 3).
+- **Vector store** uses Spring AI's `RedisVectorStore` (RediSearch) on a **dedicated `JedisPooled`** — the cache/auth path stays on Lettuce; the two Redis clients coexist. All vectors share one index (`aics-kb-index`); tenant isolation is via Document metadata, to be filtered at recall time in M3 (M2 only writes).
+- Frontend polls `GET /kb/{kbId}/documents` for status progression.
 
 ## Key Redis Patterns (retained dianping infrastructure)
 
