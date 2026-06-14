@@ -8,7 +8,7 @@ This repo (local dir still named `hm-dianping`) has been **transformed** from th
 
 - **Design blueprint**: `AI智能客服平台-改造设计方案.md` (repo root).
 - **Cross-session entry point**: `项目进度.md` (repo root) — current milestone, next steps, env connection info, **changelog (append one entry per meaningful change; read this first when starting a session)**.
-- **Status**: M0 (env), **M1 (skeleton), and M2 (knowledge-base ingestion pipeline) complete** — Spring Boot 3.4.5 / Java 21; multi-tenant model + tenant-aware auth + tenant/knowledge-base CRUD + minimal Spring AI `/chat` to 百炼; plus an async ingestion pipeline (upload → RocketMQ → chunk + embed → RediSearch vector index). Next is **M3** (RAG: vector recall + LLM + SSE streaming).
+- **Status**: M0 (env), **M1 (skeleton), M2 (knowledge-base ingestion pipeline), and M3 (RAG Q&A) complete** — Spring Boot 3.4.5 / Java 21; multi-tenant model + tenant-aware auth + tenant/knowledge-base CRUD; an async ingestion pipeline (upload → RocketMQ → chunk + embed → RediSearch vector index); and RAG Q&A (vector recall filtered by `tenantId`/`kbId` → prompt + citations → LLM → non-stream `/chat` & SSE `/chat/stream`, plus Redis-backed multi-turn context). Next is **M4** (semantic cache: similar-question cache hit + the cache trio).
 
 > **Legacy note**: the original dianping business code (shop/blog/voucher/follow/user controllers & services) still exists and compiles, but is **inactive** — its tables are not in the new DB and its endpoints sit behind the new auth gate. Treat it as reference/infrastructure, not live functionality. The `frontend/` nginx SPA is likewise the old dianping UI, not yet adapted to the new APIs.
 
@@ -58,19 +58,26 @@ docker compose up -d mysql redis   # just DB + Redis (enough for most backend wo
 Spring Boot 3.4.5 / Java 21, layered under `com.hmdp` (jakarta.* namespace, MyBatis-Plus boot3 starter):
 
 - **auth/** — multi-tenant auth (the M1 rewrite). `UserContext` (ThreadLocal carrying `LoginUser` incl. `tenantId`, with `getTenantId()`), `RefreshTokenInterceptor` (order 0, all paths — loads token Hash into context, refreshes TTL), `LoginInterceptor` (order 1, protected paths — 401 if no context). Wired in `config/MvcConfig`; public paths: `/auth/login`, `/auth/register`.
-- **controller/** — new platform endpoints: `AuthController` (`/auth/register|login|me|logout`), `TenantController` (`/tenant/current`), `KnowledgeBaseController` (`/kb` CRUD + `/kb/{kbId}/documents` upload/list), `ChatController` (`/chat`). Plus legacy dianping controllers (inactive).
+- **controller/** — new platform endpoints: `AuthController` (`/auth/register|login|me|logout`), `TenantController` (`/tenant/current`), `KnowledgeBaseController` (`/kb` CRUD + `/kb/{kbId}/documents` upload/list), `ChatController` (`/chat` non-stream RAG + `/chat/stream` SSE; captures `tenantId` from `UserContext` on the request thread before the async stream runs). Plus legacy dianping controllers (inactive).
 - **service/impl/** — business logic; most extend MyBatis-Plus `ServiceImpl`. New: `AuthServiceImpl`, `TenantServiceImpl`, `SysUserServiceImpl`, `KnowledgeBaseServiceImpl`, `KbDocumentServiceImpl`, `ChatServiceImpl`.
 - **entity/** — new tenant-scoped entities `Tenant`, `SysUser`, `KnowledgeBase`, `KbDocument` (each carries `tenant_id` for logical isolation).
 - **mq/** — RocketMQ pipeline (M2): `DocIngestMessage` (payload `{tenantId,kbId,docId}`), `DocIngestConsumer` (self-managed `DefaultMQPushConsumer`, the chunk→embed→write-vector worker).
-- **constant/** — `IngestConstants` (RocketMQ topic/group, RediSearch index name `aics-kb-index` + key prefix `aics:kb:`).
-- **dto/** — `Result` (unified response), `LoginUser` (auth payload), `RegisterFormDTO`, `AuthLoginFormDTO`, `KnowledgeBaseFormDTO`, `DocUploadDTO`, `ChatRequestDTO`.
-- **config/** — `MvcConfig` (interceptor chain), `RedissonConfig` (single-node Redisson → 6381), `RocketMQConfig` (native `DefaultMQProducer` bean), `VectorStoreConfig` (dedicated `JedisPooled` + Spring AI `RedisVectorStore`), `MybatisConfig` (pagination), `WebExceptionAdvice`.
+- **dto/** — `Result` (unified response), `LoginUser` (auth payload), `RegisterFormDTO`, `AuthLoginFormDTO`, `KnowledgeBaseFormDTO`, `DocUploadDTO`, `ChatRequestDTO` (`message`/`kbId`/`conversationId`), `ChatResponseDTO` (`conversationId`/`answer`/`sources`).
+- **constant/** — `IngestConstants` (RocketMQ topic/group, RediSearch index/prefix), `ChatConstants` (RAG topK/similarity threshold, multi-turn window/TTL, history key suffix).
+- **config/** — `MvcConfig` (interceptor chain), `RedissonConfig` (single-node Redisson → 6381), `RocketMQConfig` (native `DefaultMQProducer` bean), `VectorStoreConfig` (dedicated `JedisPooled` + Spring AI `RedisVectorStore`, declaring `tenantId`/`kbId` TAG + `docId`/`docName` TEXT metadata fields so recall can filter), `MybatisConfig` (pagination), `WebExceptionAdvice`.
 
 ### Multi-tenancy (logical isolation)
 One deployment serves N tenants. Every business table carries `tenant_id`; login resolves the tenant from a globally-unique `username` and stores `tenantId` in the token Hash. Service layer **always filters by `UserContext.getTenantId()`** — cross-tenant access simply finds nothing (see `KnowledgeBaseServiceImpl.getOwned`). Redis keys use the tenant prefix helper `RedisConstants.tenantKey(tenantId, suffix)` → `t:{tenantId}:{suffix}`.
 
 ### AI (Spring AI + 百炼)
-`spring-ai-alibaba-starter-dashscope:1.0.0.2` (built on Spring AI 1.0 GA). `ChatServiceImpl` injects Spring AI `ChatClient` and calls `prompt().user(msg).call().content()`. Swapping models / adding RAG later won't change this call site. Embedding via `text-embedding-v3` (1024-dim), configured under `spring.ai.dashscope.embedding`.
+`spring-ai-alibaba-starter-dashscope:1.0.0.2` (built on Spring AI 1.0 GA). `ChatServiceImpl` injects Spring AI `ChatClient` (`prompt().system(...).messages(history).user(msg).call()/.stream()`). Chat model `qwen-plus`; embedding via `text-embedding-v3` (1024-dim), configured under `spring.ai.dashscope.embedding`.
+
+### RAG Q&A engine (M3)
+`ChatServiceImpl` is the RAG pipeline; both entry points take `tenantId` as an explicit arg (the controller reads `UserContext` on the request thread — the streaming `Flux` runs after the interceptor has cleared the ThreadLocal).
+- **Recall**: `retrieve()` builds a `FilterExpressionBuilder` filter on `tenantId` (+ optional `kbId`) and calls `vectorStore.similaritySearch(SearchRequest)` (topK 4, similarityThreshold 0.3). Metadata values are stored as strings, so filter values use `String.valueOf`. **Requires the `tenantId`/`kbId` TAG fields declared in `VectorStoreConfig`** — RediSearch can't filter undeclared fields.
+- **Prompt + citations**: retrieved chunks become a system prompt ("answer only from the material; if absent, say so — don't fabricate"); the same chunks are returned as `sources` (docName + score + truncated snippet).
+- **Two entry points**: `POST /chat` returns `{conversationId, answer, sources}`; `POST /chat/stream` is SSE (`text/event-stream`) emitting a `meta` event (conversationId + sources), then per-token `message` events, then `done`.
+- **Multi-turn context**: a Redis List at `RedisConstants.tenantKey(tenantId, "chat:hist:" + conversationId)`; each turn appends user+assistant JSON, trims to `HISTORY_WINDOW` (10), and sets `HISTORY_TTL` (30 min). Loaded back into `UserMessage`/`AssistantMessage` for the next prompt. First-turn `conversationId` is minted by `RedisIdWorker`. Implemented directly on Redis (not Spring AI `ChatMemory`) to keep the "Redis-bounded context window" selling point explicit.
 
 ### Knowledge-base ingestion pipeline (M2)
 Async pipeline so the slow/expensive embedding call never blocks the user request:

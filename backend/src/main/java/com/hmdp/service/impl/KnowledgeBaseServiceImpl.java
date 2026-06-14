@@ -79,6 +79,11 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KnowledgeBaseMapper, K
         return Result.ok();
     }
 
+    @Override
+    public boolean isOwned(Long id) {
+        return id != null && getOwned(id) != null;
+    }
+
     /** 取当前租户名下的知识库,拿不到(不存在或不属于本租户)返回 null,杜绝越权 */
     private KnowledgeBase getOwned(Long id) {
         Long tenantId = UserContext.getTenantId();

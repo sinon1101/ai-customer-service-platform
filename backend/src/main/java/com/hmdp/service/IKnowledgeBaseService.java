@@ -21,4 +21,7 @@ public interface IKnowledgeBaseService extends IService<KnowledgeBase> {
 
     /** 删除当前租户的某个知识库 */
     Result remove(Long id);
+
+    /** 该知识库是否属于当前登录租户(RAG 提问时校验 kbId 归属,杜绝越权检索) */
+    boolean isOwned(Long id);
 }
