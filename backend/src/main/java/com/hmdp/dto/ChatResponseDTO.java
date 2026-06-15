@@ -23,6 +23,9 @@ public class ChatResponseDTO {
     /** 引用溯源:本次回答命中的知识片段来源 */
     private List<Source> sources;
 
+    /** 是否命中语义缓存(true = 直接走缓存,未调用 LLM) */
+    private boolean cached;
+
     /** 命中的知识片段来源(引用溯源) */
     @Data
     @NoArgsConstructor
