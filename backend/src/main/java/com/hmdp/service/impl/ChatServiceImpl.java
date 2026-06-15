@@ -3,6 +3,9 @@ package com.hmdp.service.impl;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import com.hmdp.cache.SemanticCache;
+import com.hmdp.cache.SemanticCache.CachedAnswer;
+import com.hmdp.constant.CacheConstants;
 import com.hmdp.constant.ChatConstants;
 import com.hmdp.dto.ChatRequestDTO;
 import com.hmdp.dto.ChatResponseDTO;
@@ -25,14 +28,19 @@ import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
- * RAG 问答引擎(M3)。
+ * RAG 问答引擎(M3)+ 语义缓存(M4)。
  * <p>
- * 提问 → embedding + 向量召回 Top-K(按 tenantId/kbId 过滤,逻辑隔离)→ 拼 Prompt(带引用溯源)
- * → LLM(非流式整体 / SSE 逐字流式)→ 把本轮对话写回 Redis 多轮上下文(限定窗口,控 token)。
+ * 提问 → <b>语义缓存短路</b>(无历史的单轮提问先在缓存向量集找相似历史问答,命中直接返回、不打 LLM)
+ * → 未命中:embedding + 向量召回 Top-K(按 tenantId/kbId 过滤)→ 拼 Prompt(带引用溯源)
+ * → LLM(非流式整体 / SSE 逐字流式)→ 把答案写回语义缓存 + 多轮上下文。
+ * <p>
+ * 语义缓存仅对<b>无历史的单轮提问</b>启用:有上下文时答案依赖历史,按问题做键会答错。
+ * 缓存三件套(穿透空值缓存 / 击穿互斥锁 / 雪崩随机 TTL)封装在 {@link SemanticCache}。
  */
 @Slf4j
 @Service
@@ -42,6 +50,9 @@ public class ChatServiceImpl implements IChatService {
 
     @Resource
     private RedisVectorStore vectorStore;
+
+    @Resource
+    private SemanticCache semanticCache;
 
     @Resource
     private org.springframework.data.redis.core.StringRedisTemplate stringRedisTemplate;
@@ -56,38 +67,107 @@ public class ChatServiceImpl implements IChatService {
     @Override
     public ChatResponseDTO chat(ChatRequestDTO request, Long tenantId) {
         String question = request.getMessage();
+        Long kbId = request.getKbId();
         String conversationId = resolveConversationId(request.getConversationId());
 
-        List<Document> docs = retrieve(question, tenantId, request.getKbId());
         List<Message> history = loadHistory(tenantId, conversationId);
+        boolean cacheEligible = history.isEmpty();
 
-        String answer = chatClient.prompt()
-                .system(buildSystemPrompt(docs))
-                .messages(history)
-                .user(question)
-                .call()
-                .content();
+        // 1. 语义缓存短路(仅无历史单轮)
+        if (cacheEligible) {
+            Optional<CachedAnswer> hit = semanticCache.lookup(tenantId, kbId, question);
+            if (hit.isPresent()) {
+                return cachedResponse(tenantId, conversationId, question, hit.get());
+            }
+            // 2. 未命中:互斥锁防击穿
+            return generateWithLock(tenantId, kbId, conversationId, question);
+        }
 
-        saveTurn(tenantId, conversationId, question, answer);
-        return new ChatResponseDTO(conversationId, answer, toSources(docs));
+        // 多轮(有历史):答案依赖上下文,不走缓存,直接生成
+        Generated g = generate(question, tenantId, kbId, history);
+        saveTurn(tenantId, conversationId, question, g.answer);
+        return new ChatResponseDTO(conversationId, g.answer, g.sources, false);
+    }
+
+    /** 击穿防护:未命中时只放一个线程打 LLM 并回填缓存,其余线程等它重建完再读结果 */
+    private ChatResponseDTO generateWithLock(Long tenantId, Long kbId, String conversationId, String question) {
+        if (semanticCache.tryLock(tenantId, kbId, question)) {
+            // 抢到锁:我负责重建
+            try {
+                // double check:可能在「初次未命中」与「抢到锁」之间已被别人回填
+                Optional<CachedAnswer> dbl = semanticCache.lookup(tenantId, kbId, question);
+                if (dbl.isPresent()) {
+                    return cachedResponse(tenantId, conversationId, question, dbl.get());
+                }
+                Generated g = generate(question, tenantId, kbId, List.of());
+                semanticCache.save(tenantId, kbId, question, g.answer, g.sources, g.answered);
+                saveTurn(tenantId, conversationId, question, g.answer);
+                return new ChatResponseDTO(conversationId, g.answer, g.sources, false);
+            } finally {
+                semanticCache.unlock(tenantId, kbId, question);
+            }
+        }
+        // 没抢到锁:廉价轮询等持锁者重建完成,再读它回填的结果(避免重复打 LLM)
+        semanticCache.awaitUnlock(tenantId, kbId, question);
+        Optional<CachedAnswer> filled = semanticCache.lookup(tenantId, kbId, question);
+        if (filled.isPresent()) {
+            return cachedResponse(tenantId, conversationId, question, filled.get());
+        }
+        // 持锁者异常未回填:自己兜底算一次(不回填,交给下一个抢到锁的)
+        Generated g = generate(question, tenantId, kbId, List.of());
+        saveTurn(tenantId, conversationId, question, g.answer);
+        return new ChatResponseDTO(conversationId, g.answer, g.sources, false);
     }
 
     @Override
     public Flux<ServerSentEvent<String>> chatStream(ChatRequestDTO request, Long tenantId) {
         String question = request.getMessage();
+        Long kbId = request.getKbId();
         String conversationId = resolveConversationId(request.getConversationId());
 
-        List<Document> docs = retrieve(question, tenantId, request.getKbId());
         List<Message> history = loadHistory(tenantId, conversationId);
+        boolean cacheEligible = history.isEmpty();
 
-        // 先把 conversationId + 引用溯源作为一条 meta 事件下发,便于前端立刻拿到会话号/来源
+        if (cacheEligible) {
+            Optional<CachedAnswer> hit = semanticCache.lookup(tenantId, kbId, question);
+            if (hit.isPresent()) {
+                return streamCached(tenantId, conversationId, question, hit.get());
+            }
+            // 未命中:抢重建锁,抢到的负责流式生成 + 回填缓存 + 释放锁;没抢到的等一下再看缓存
+            if (semanticCache.tryLock(tenantId, kbId, question)) {
+                Optional<CachedAnswer> dbl = semanticCache.lookup(tenantId, kbId, question);
+                if (dbl.isPresent()) {
+                    semanticCache.unlock(tenantId, kbId, question);
+                    return streamCached(tenantId, conversationId, question, dbl.get());
+                }
+                return streamFromLlm(tenantId, kbId, conversationId, question, List.of(), true);
+            }
+            // 没抢到锁:廉价轮询等持锁者重建完成,再读结果;命中就回放,否则不回填地流式生成
+            semanticCache.awaitUnlock(tenantId, kbId, question);
+            Optional<CachedAnswer> filled = semanticCache.lookup(tenantId, kbId, question);
+            if (filled.isPresent()) {
+                return streamCached(tenantId, conversationId, question, filled.get());
+            }
+            return streamFromLlm(tenantId, kbId, conversationId, question, List.of(), false);
+        }
+
+        // 多轮:不走缓存
+        return streamFromLlm(tenantId, kbId, conversationId, question, history, false);
+    }
+
+    /** 流式:从 LLM 逐字生成;ownLock=true 时在结束回填缓存,并在终止(完成/取消/异常)时释放锁 */
+    private Flux<ServerSentEvent<String>> streamFromLlm(Long tenantId, Long kbId, String conversationId,
+                                                        String question, List<Message> history, boolean ownLock) {
+        List<Document> docs = retrieve(question, tenantId, kbId);
+        List<ChatResponseDTO.Source> sources = toSources(docs);
+
         JSONObject meta = new JSONObject()
                 .set("conversationId", conversationId)
-                .set("sources", toSources(docs));
+                .set("sources", sources)
+                .set("cached", false);
         Flux<ServerSentEvent<String>> metaEvent =
                 Flux.just(ServerSentEvent.<String>builder(meta.toString()).event("meta").build());
 
-        // 逐字流式;一边推送一边累积完整答案,结束时落库多轮上下文
         StringBuilder full = new StringBuilder();
         Flux<ServerSentEvent<String>> tokenEvents = chatClient.prompt()
                 .system(buildSystemPrompt(docs))
@@ -99,12 +179,70 @@ public class ChatServiceImpl implements IChatService {
                 .map(token -> ServerSentEvent.<String>builder(token).event("message").build());
 
         Flux<ServerSentEvent<String>> doneEvent = Flux.defer(() -> {
-            saveTurn(tenantId, conversationId, question, full.toString());
+            String answer = full.toString();
+            saveTurn(tenantId, conversationId, question, answer);
+            if (ownLock) {
+                semanticCache.save(tenantId, kbId, question, answer, sources, isAnswered(answer));
+            }
             return Flux.just(ServerSentEvent.<String>builder("[DONE]").event("done").build());
         });
 
-        return Flux.concat(metaEvent, tokenEvents, doneEvent)
+        Flux<ServerSentEvent<String>> result = Flux.concat(metaEvent, tokenEvents, doneEvent)
                 .doOnError(e -> log.error("RAG 流式回答异常 convId={}", conversationId, e));
+        if (ownLock) {
+            // 不管完成/取消/异常都释放锁,避免死锁
+            result = result.doFinally(sig -> semanticCache.unlock(tenantId, kbId, question));
+        }
+        return result;
+    }
+
+    /** 流式:命中语义缓存,按缓存答案逐字下发(保持前端流式 UX 一致),不调用 LLM */
+    private Flux<ServerSentEvent<String>> streamCached(Long tenantId, String conversationId,
+                                                       String question, CachedAnswer cached) {
+        saveTurn(tenantId, conversationId, question, cached.getAnswer());
+
+        JSONObject meta = new JSONObject()
+                .set("conversationId", conversationId)
+                .set("sources", cached.getSources())
+                .set("cached", true);
+        Flux<ServerSentEvent<String>> metaEvent =
+                Flux.just(ServerSentEvent.<String>builder(meta.toString()).event("meta").build());
+
+        Flux<ServerSentEvent<String>> tokenEvents = Flux.fromIterable(toCodePoints(cached.getAnswer()))
+                .map(token -> ServerSentEvent.<String>builder(token).event("message").build());
+
+        Flux<ServerSentEvent<String>> doneEvent =
+                Flux.just(ServerSentEvent.<String>builder("[DONE]").event("done").build());
+
+        return Flux.concat(metaEvent, tokenEvents, doneEvent);
+    }
+
+    // ───────────────────── 生成(召回 + LLM)─────────────────────
+
+    /** 单次生成结果:答案 + 引用溯源 + 是否在知识库中找到了答案(决定缓存 TTL) */
+    private record Generated(String answer, List<ChatResponseDTO.Source> sources, boolean answered) {
+    }
+
+    private Generated generate(String question, Long tenantId, Long kbId, List<Message> history) {
+        List<Document> docs = retrieve(question, tenantId, kbId);
+        String answer = chatClient.prompt()
+                .system(buildSystemPrompt(docs))
+                .messages(history)
+                .user(question)
+                .call()
+                .content();
+        return new Generated(answer, toSources(docs), isAnswered(answer));
+    }
+
+    /** 是否真的答出来了:非空且不含「未找到」兜底语。决定缓存按有效答案还是空值存(穿透防护)。 */
+    private boolean isAnswered(String answer) {
+        return StrUtil.isNotBlank(answer) && !answer.contains(ChatConstants.NOT_FOUND_MARKER);
+    }
+
+    /** 命中缓存的统一返回:落多轮上下文 + 标记 cached=true */
+    private ChatResponseDTO cachedResponse(Long tenantId, String conversationId, String question, CachedAnswer cached) {
+        saveTurn(tenantId, conversationId, question, cached.getAnswer());
+        return new ChatResponseDTO(conversationId, cached.getAnswer(), cached.getSources(), true);
     }
 
     // ───────────────────── 召回 / Prompt / 溯源 ─────────────────────
@@ -201,5 +339,15 @@ public class ChatServiceImpl implements IChatService {
         // 只保留最近 HISTORY_WINDOW 条,控制后续 prompt 的 token 体量
         stringRedisTemplate.opsForList().trim(key, -ChatConstants.HISTORY_WINDOW, -1);
         stringRedisTemplate.expire(key, ChatConstants.HISTORY_TTL_MINUTES, TimeUnit.MINUTES);
+    }
+
+    /** 把字符串按 Unicode code point 切成单字列表(正确处理中文/surrogate),用于流式逐字下发缓存答案 */
+    private List<String> toCodePoints(String s) {
+        if (StrUtil.isEmpty(s)) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>(s.length());
+        s.codePoints().forEach(cp -> out.add(new String(Character.toChars(cp))));
+        return out;
     }
 }

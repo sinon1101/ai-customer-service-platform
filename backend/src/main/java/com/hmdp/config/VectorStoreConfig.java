@@ -1,5 +1,6 @@
 package com.hmdp.config;
 
+import com.hmdp.constant.CacheConstants;
 import com.hmdp.constant.IngestConstants;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.vectorstore.redis.RedisVectorStore;
@@ -46,6 +47,29 @@ public class VectorStoreConfig {
                         MetadataField.text("docId"),
                         MetadataField.text("docName"))
                 // 首启自动建 RediSearch 索引(已存在则跳过)
+                .initializeSchema(true)
+                .build();
+    }
+
+    /**
+     * M4 语义缓存专用向量库:独立索引 {@code aics-cache-index} / 前缀 {@code aics:cache:},
+     * 与知识库索引分库,便于单独给缓存项设 TTL(雪崩抖动/空值短 TTL)。
+     * 复用同一条 {@link JedisPooled} 连接;只把 {@code tenantId}/{@code kbId} 声明为 TAG 用于过滤,
+     * answer/sources/answered/question 作为普通 metadata 随 JSON 存储并回显(不进索引)。
+     */
+    @Bean
+    public RedisVectorStore semanticCacheStore(JedisPooled vectorStoreJedis, EmbeddingModel embeddingModel) {
+        return RedisVectorStore.builder(vectorStoreJedis, embeddingModel)
+                .indexName(CacheConstants.CACHE_INDEX)
+                .prefix(CacheConstants.CACHE_PREFIX)
+                // tenantId/kbId 为 TAG 用于过滤;answer/sources/answered 为 TEXT —— 仅为让
+                // RediSearch 在召回时把它们一并 RETURN 回来(未声明的 metadata 存了也不会被返回)。
+                .metadataFields(
+                        MetadataField.tag("tenantId"),
+                        MetadataField.tag("kbId"),
+                        MetadataField.text("answer"),
+                        MetadataField.text("sources"),
+                        MetadataField.text("answered"))
                 .initializeSchema(true)
                 .build();
     }

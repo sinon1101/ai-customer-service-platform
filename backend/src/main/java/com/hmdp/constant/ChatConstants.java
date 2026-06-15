@@ -23,6 +23,13 @@ public class ChatConstants {
     /** RedisIdWorker 生成 conversationId 用的业务前缀 */
     public static final String CONVERSATION_ID_PREFIX = "chat";
 
+    /**
+     * 「未在知识库找到答案」兜底语的稳定子串(见 system prompt)。
+     * 用于判定本轮是否真的答出来了 —— 决定语义缓存按有效答案(长 TTL)还是空值(短 TTL)存。
+     * 注意:召回阈值较松,docs 非空不代表答出来了,必须以答案文本为准。
+     */
+    public static final String NOT_FOUND_MARKER = "知识库中暂未找到";
+
     private ChatConstants() {
     }
 }
