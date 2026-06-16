@@ -30,6 +30,15 @@ public class ChatConstants {
      */
     public static final String NOT_FOUND_MARKER = "知识库中暂未找到";
 
+    /** 限流拒绝时返回给用户的文案(HTTP 429) */
+    public static final String RATE_LIMITED_MESSAGE = "请求过于频繁,请稍后再试";
+
+    /**
+     * 降级兜底话术(M5):LLM 被熔断 / 超时 / 失败 / 信号量过载时返回。
+     * 用静态话术兜底(不在降级时再调一次 LLM/embedding,避免级联故障);真实转人工工单留给 M6。
+     */
+    public static final String DEGRADE_FALLBACK_ANSWER = "抱歉,当前 AI 客服繁忙,已为您转接人工客服,请稍候。";
+
     private ChatConstants() {
     }
 }

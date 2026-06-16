@@ -26,6 +26,9 @@ public class ChatResponseDTO {
     /** 是否命中语义缓存(true = 直接走缓存,未调用 LLM) */
     private boolean cached;
 
+    /** 是否为降级兜底响应(M5:LLM 被熔断/超时/失败/过载时返回静态 FAQ 话术) */
+    private boolean degraded;
+
     /** 命中的知识片段来源(引用溯源) */
     @Data
     @NoArgsConstructor

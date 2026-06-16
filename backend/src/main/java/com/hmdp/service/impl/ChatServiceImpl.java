@@ -7,8 +7,12 @@ import com.hmdp.cache.SemanticCache;
 import com.hmdp.cache.SemanticCache.CachedAnswer;
 import com.hmdp.constant.CacheConstants;
 import com.hmdp.constant.ChatConstants;
+import com.hmdp.constant.GovernanceConstants;
 import com.hmdp.dto.ChatRequestDTO;
 import com.hmdp.dto.ChatResponseDTO;
+import com.hmdp.governance.FaultInjector;
+import com.hmdp.governance.LlmCircuitBreaker;
+import com.hmdp.governance.TenantBulkhead;
 import com.hmdp.service.IChatService;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisIdWorker;
@@ -26,10 +30,16 @@ import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 /**
@@ -60,6 +70,23 @@ public class ChatServiceImpl implements IChatService {
     @Resource
     private RedisIdWorker redisIdWorker;
 
+    // ───── M5 高并发治理:隔离(信号量)/ 熔断 / 故障注入 ─────
+    @Resource
+    private TenantBulkhead bulkhead;
+
+    @Resource
+    private LlmCircuitBreaker breaker;
+
+    @Resource
+    private FaultInjector faultInjector;
+
+    /** 同步 LLM 调用的有界执行器(配合超时;daemon 线程不阻塞退出)。并发上限由租户信号量约束。 */
+    private final ExecutorService llmExecutor = Executors.newCachedThreadPool(r -> {
+        Thread t = new Thread(r, "llm-call");
+        t.setDaemon(true);
+        return t;
+    });
+
     public ChatServiceImpl(ChatClient.Builder builder) {
         this.chatClient = builder.build();
     }
@@ -85,8 +112,10 @@ public class ChatServiceImpl implements IChatService {
 
         // 多轮(有历史):答案依赖上下文,不走缓存,直接生成
         Generated g = generate(question, tenantId, kbId, history);
-        saveTurn(tenantId, conversationId, question, g.answer);
-        return new ChatResponseDTO(conversationId, g.answer, g.sources, false);
+        if (!g.degraded) {
+            saveTurn(tenantId, conversationId, question, g.answer);
+        }
+        return new ChatResponseDTO(conversationId, g.answer, g.sources, false, g.degraded);
     }
 
     /** 击穿防护:未命中时只放一个线程打 LLM 并回填缓存,其余线程等它重建完再读结果 */
@@ -100,9 +129,12 @@ public class ChatServiceImpl implements IChatService {
                     return cachedResponse(tenantId, conversationId, question, dbl.get());
                 }
                 Generated g = generate(question, tenantId, kbId, List.of());
-                semanticCache.save(tenantId, kbId, question, g.answer, g.sources, g.answered);
-                saveTurn(tenantId, conversationId, question, g.answer);
-                return new ChatResponseDTO(conversationId, g.answer, g.sources, false);
+                // 降级兜底不回填缓存、不落历史(只是临时话术,非有效答案)
+                if (!g.degraded) {
+                    semanticCache.save(tenantId, kbId, question, g.answer, g.sources, g.answered);
+                    saveTurn(tenantId, conversationId, question, g.answer);
+                }
+                return new ChatResponseDTO(conversationId, g.answer, g.sources, false, g.degraded);
             } finally {
                 semanticCache.unlock(tenantId, kbId, question);
             }
@@ -115,8 +147,10 @@ public class ChatServiceImpl implements IChatService {
         }
         // 持锁者异常未回填:自己兜底算一次(不回填,交给下一个抢到锁的)
         Generated g = generate(question, tenantId, kbId, List.of());
-        saveTurn(tenantId, conversationId, question, g.answer);
-        return new ChatResponseDTO(conversationId, g.answer, g.sources, false);
+        if (!g.degraded) {
+            saveTurn(tenantId, conversationId, question, g.answer);
+        }
+        return new ChatResponseDTO(conversationId, g.answer, g.sources, false, g.degraded);
     }
 
     @Override
@@ -155,16 +189,50 @@ public class ChatServiceImpl implements IChatService {
         return streamFromLlm(tenantId, kbId, conversationId, question, history, false);
     }
 
-    /** 流式:从 LLM 逐字生成;ownLock=true 时在结束回填缓存,并在终止(完成/取消/异常)时释放锁 */
+    /**
+     * 流式:从 LLM 逐字生成;ownLock=true 时在结束回填缓存,并在终止(完成/取消/异常)时释放锁。
+     * <p>
+     * M5 治理:进入前依次过「故障注入 / 熔断放行 / 租户信号量隔离」三关,任一不过 → 直接降级流(不打 LLM);
+     * 流式过程中 LLM 出错/超时 → 记熔断失败并切降级流;无论如何在 doFinally 释放信号量(与锁同位置)。
+     */
     private Flux<ServerSentEvent<String>> streamFromLlm(Long tenantId, Long kbId, String conversationId,
                                                         String question, List<Message> history, boolean ownLock) {
-        List<Document> docs = retrieve(question, tenantId, kbId);
+        // ① 故障注入:演示用,强制失败 → 记一次熔断失败,走降级流
+        if (faultInjector.isEnabled()) {
+            breaker.recordFailure();
+            if (ownLock) semanticCache.unlock(tenantId, kbId, question);
+            return streamDegraded(conversationId);
+        }
+        // ② 熔断:跳闸中 → 直接降级流(快速失败,不打 LLM)
+        if (!breaker.allow()) {
+            log.warn("LLM 熔断跳闸中,流式直接降级兜底 tenantId={}", tenantId);
+            if (ownLock) semanticCache.unlock(tenantId, kbId, question);
+            return streamDegraded(conversationId);
+        }
+        // ③ 隔离:抢该租户信号量名额,满了 → 过载降级流
+        if (!bulkhead.tryAcquire(tenantId)) {
+            if (ownLock) semanticCache.unlock(tenantId, kbId, question);
+            return streamDegraded(conversationId);
+        }
+
+        // 召回(embedding)也可能失败:失败即记熔断失败 + 释放名额/锁 + 降级流
+        List<Document> docs;
+        try {
+            docs = retrieve(question, tenantId, kbId);
+        } catch (Exception e) {
+            log.warn("流式召回失败,降级兜底 tenantId={}", tenantId, e);
+            breaker.recordFailure();
+            bulkhead.release(tenantId);
+            if (ownLock) semanticCache.unlock(tenantId, kbId, question);
+            return streamDegraded(conversationId);
+        }
         List<ChatResponseDTO.Source> sources = toSources(docs);
 
         JSONObject meta = new JSONObject()
                 .set("conversationId", conversationId)
                 .set("sources", sources)
-                .set("cached", false);
+                .set("cached", false)
+                .set("degraded", false);
         Flux<ServerSentEvent<String>> metaEvent =
                 Flux.just(ServerSentEvent.<String>builder(meta.toString()).event("meta").build());
 
@@ -175,25 +243,49 @@ public class ChatServiceImpl implements IChatService {
                 .user(question)
                 .stream()
                 .content()
+                .timeout(Duration.ofMillis(GovernanceConstants.LLM_TIMEOUT_MILLIS))
                 .doOnNext(full::append)
                 .map(token -> ServerSentEvent.<String>builder(token).event("message").build());
 
         Flux<ServerSentEvent<String>> doneEvent = Flux.defer(() -> {
             String answer = full.toString();
             saveTurn(tenantId, conversationId, question, answer);
+            breaker.recordSuccess();
             if (ownLock) {
                 semanticCache.save(tenantId, kbId, question, answer, sources, isAnswered(answer));
             }
             return Flux.just(ServerSentEvent.<String>builder("[DONE]").event("done").build());
         });
 
-        Flux<ServerSentEvent<String>> result = Flux.concat(metaEvent, tokenEvents, doneEvent)
-                .doOnError(e -> log.error("RAG 流式回答异常 convId={}", conversationId, e));
-        if (ownLock) {
-            // 不管完成/取消/异常都释放锁,避免死锁
-            result = result.doFinally(sig -> semanticCache.unlock(tenantId, kbId, question));
-        }
-        return result;
+        return Flux.concat(metaEvent, tokenEvents, doneEvent)
+                .onErrorResume(e -> {
+                    // LLM 流式出错/超时 → 记熔断失败,切降级流
+                    log.error("RAG 流式回答异常,降级兜底 convId={}", conversationId, e);
+                    breaker.recordFailure();
+                    return streamDegraded(conversationId);
+                })
+                // 不管完成/取消/异常都释放信号量名额与锁,避免泄漏/死锁
+                .doFinally(sig -> {
+                    bulkhead.release(tenantId);
+                    if (ownLock) semanticCache.unlock(tenantId, kbId, question);
+                });
+    }
+
+    /** 流式降级兜底:按 code point 逐字回放静态 FAQ 话术(保持前端流式 UX),不调用 LLM、不落历史/缓存 */
+    private Flux<ServerSentEvent<String>> streamDegraded(String conversationId) {
+        JSONObject meta = new JSONObject()
+                .set("conversationId", conversationId)
+                .set("sources", List.of())
+                .set("cached", false)
+                .set("degraded", true);
+        Flux<ServerSentEvent<String>> metaEvent =
+                Flux.just(ServerSentEvent.<String>builder(meta.toString()).event("meta").build());
+        Flux<ServerSentEvent<String>> tokenEvents =
+                Flux.fromIterable(toCodePoints(ChatConstants.DEGRADE_FALLBACK_ANSWER))
+                        .map(token -> ServerSentEvent.<String>builder(token).event("message").build());
+        Flux<ServerSentEvent<String>> doneEvent =
+                Flux.just(ServerSentEvent.<String>builder("[DONE]").event("done").build());
+        return Flux.concat(metaEvent, tokenEvents, doneEvent);
     }
 
     /** 流式:命中语义缓存,按缓存答案逐字下发(保持前端流式 UX 一致),不调用 LLM */
@@ -204,7 +296,8 @@ public class ChatServiceImpl implements IChatService {
         JSONObject meta = new JSONObject()
                 .set("conversationId", conversationId)
                 .set("sources", cached.getSources())
-                .set("cached", true);
+                .set("cached", true)
+                .set("degraded", false);
         Flux<ServerSentEvent<String>> metaEvent =
                 Flux.just(ServerSentEvent.<String>builder(meta.toString()).event("meta").build());
 
@@ -219,11 +312,55 @@ public class ChatServiceImpl implements IChatService {
 
     // ───────────────────── 生成(召回 + LLM)─────────────────────
 
-    /** 单次生成结果:答案 + 引用溯源 + 是否在知识库中找到了答案(决定缓存 TTL) */
-    private record Generated(String answer, List<ChatResponseDTO.Source> sources, boolean answered) {
+    /** 单次生成结果:答案 + 引用溯源 + 是否在知识库中找到了答案(决定缓存 TTL)+ 是否为降级兜底 */
+    private record Generated(String answer, List<ChatResponseDTO.Source> sources, boolean answered, boolean degraded) {
     }
 
+    /**
+     * 带治理的同步生成(M5):熔断放行判断 → 租户信号量隔离 → 超时调 LLM → 失败/超时/过载/跳闸 一律降级兜底。
+     * 注:语义缓存命中路径不经此方法,故不占治理资源。
+     */
     private Generated generate(String question, Long tenantId, Long kbId, List<Message> history) {
+        // 熔断:跳闸中直接降级(快速失败,毫秒级返回,不计失败 —— 这本就是保护)
+        if (!breaker.allow()) {
+            log.warn("LLM 熔断跳闸中,直接降级兜底 tenantId={}", tenantId);
+            return degraded();
+        }
+        // 隔离:抢该租户信号量名额,满了 → 过载降级(chat 以兜底消化过载,不抛 503)
+        if (!bulkhead.tryAcquire(tenantId)) {
+            return degraded();
+        }
+        try {
+            Generated g = callLlmWithTimeout(question, tenantId, kbId, history);
+            breaker.recordSuccess();
+            return g;
+        } catch (Exception e) {
+            log.warn("LLM 生成失败/超时,降级兜底 tenantId={}", tenantId, e);
+            breaker.recordFailure();
+            return degraded();
+        } finally {
+            bulkhead.release(tenantId);
+        }
+    }
+
+    /** 在有界线程池上调用 LLM 并施加超时;超时即取消并抛出(由调用方计为熔断失败) */
+    private Generated callLlmWithTimeout(String question, Long tenantId, Long kbId, List<Message> history)
+            throws Exception {
+        Future<Generated> future = llmExecutor.submit(() -> rawGenerate(question, tenantId, kbId, history));
+        try {
+            return future.get(GovernanceConstants.LLM_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+        } catch (ExecutionException ee) {
+            Throwable cause = ee.getCause();
+            throw (cause instanceof Exception) ? (Exception) cause : ee;
+        } catch (TimeoutException te) {
+            future.cancel(true);
+            throw te;
+        }
+    }
+
+    /** 原始生成:故障注入点 → 召回 → 拼 Prompt → LLM(无治理,被 {@link #generate} 守护) */
+    private Generated rawGenerate(String question, Long tenantId, Long kbId, List<Message> history) {
+        faultInjector.failIfEnabled();   // 演示:注入故障 → 抛错 → 计熔断失败,驱动跳闸
         List<Document> docs = retrieve(question, tenantId, kbId);
         String answer = chatClient.prompt()
                 .system(buildSystemPrompt(docs))
@@ -231,7 +368,12 @@ public class ChatServiceImpl implements IChatService {
                 .user(question)
                 .call()
                 .content();
-        return new Generated(answer, toSources(docs), isAnswered(answer));
+        return new Generated(answer, toSources(docs), isAnswered(answer), false);
+    }
+
+    /** 降级兜底:静态 FAQ 话术(不再调 LLM/embedding,避免级联故障);degraded=true */
+    private Generated degraded() {
+        return new Generated(ChatConstants.DEGRADE_FALLBACK_ANSWER, List.of(), false, true);
     }
 
     /** 是否真的答出来了:非空且不含「未找到」兜底语。决定缓存按有效答案还是空值存(穿透防护)。 */
@@ -242,7 +384,7 @@ public class ChatServiceImpl implements IChatService {
     /** 命中缓存的统一返回:落多轮上下文 + 标记 cached=true */
     private ChatResponseDTO cachedResponse(Long tenantId, String conversationId, String question, CachedAnswer cached) {
         saveTurn(tenantId, conversationId, question, cached.getAnswer());
-        return new ChatResponseDTO(conversationId, cached.getAnswer(), cached.getSources(), true);
+        return new ChatResponseDTO(conversationId, cached.getAnswer(), cached.getSources(), true, false);
     }
 
     // ───────────────────── 召回 / Prompt / 溯源 ─────────────────────
