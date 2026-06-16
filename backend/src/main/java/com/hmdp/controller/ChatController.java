@@ -4,6 +4,8 @@ import cn.hutool.core.util.StrUtil;
 import com.hmdp.auth.UserContext;
 import com.hmdp.dto.ChatRequestDTO;
 import com.hmdp.dto.Result;
+import com.hmdp.exception.RateLimitException;
+import com.hmdp.governance.RateLimiter;
 import com.hmdp.service.IChatService;
 import com.hmdp.service.IKnowledgeBaseService;
 import jakarta.annotation.Resource;
@@ -34,12 +36,17 @@ public class ChatController {
     @Resource
     private IKnowledgeBaseService knowledgeBaseService;
 
+    @Resource
+    private RateLimiter rateLimiter;
+
     @PostMapping
     public Result chat(@RequestBody ChatRequestDTO request) {
         String error = validate(request);
         if (error != null) {
             return Result.fail(error);
         }
+        // 限流(M5):租户+用户双层令牌桶,超限抛 RateLimitException → 由 WebExceptionAdvice 映射 429
+        rateLimiter.checkChatRateLimit(UserContext.getTenantId(), UserContext.getUserId());
         return Result.ok(chatService.chat(request, UserContext.getTenantId()));
     }
 
@@ -48,6 +55,12 @@ public class ChatController {
         String error = validate(request);
         if (error != null) {
             return Flux.just(ServerSentEvent.<String>builder(error).event("error").build());
+        }
+        // 限流(M5):SSE 路径把拒绝转成 error 事件(沿用校验失败的返回风格),不抛到 advice
+        try {
+            rateLimiter.checkChatRateLimit(UserContext.getTenantId(), UserContext.getUserId());
+        } catch (RateLimitException e) {
+            return Flux.just(ServerSentEvent.<String>builder(e.getMessage()).event("error").build());
         }
         // UserContext 还在请求线程上,先取出 tenantId 再进入异步流
         return chatService.chatStream(request, UserContext.getTenantId());
