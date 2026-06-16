@@ -29,7 +29,9 @@ public class MvcConfig implements WebMvcConfigurer {
         registry.addInterceptor(new LoginInterceptor())
                 .excludePathPatterns(
                         "/auth/login",
-                        "/auth/register"
+                        "/auth/register",
+                        // WebSocket 握手鉴权在 WsHandshakeInterceptor(query token),不走 HTTP 登录拦截器
+                        "/ws/**"
                 )
                 .order(1);
     }

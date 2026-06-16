@@ -38,6 +38,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
+        <!-- WebSocket(M6 坐席↔访客实时会话) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
 
         <!-- MySQL 8 驱动(配 Docker 的 MySQL 8.0,版本由 Boot 管理) -->
         <dependency>
