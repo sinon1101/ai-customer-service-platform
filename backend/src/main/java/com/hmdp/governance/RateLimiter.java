@@ -3,6 +3,7 @@ package com.hmdp.governance;
 import com.hmdp.constant.GovernanceConstants;
 import com.hmdp.constant.ChatConstants;
 import com.hmdp.exception.RateLimitException;
+import com.hmdp.metrics.MetricsCollector;
 import com.hmdp.utils.RedisConstants;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.io.ClassPathResource;
@@ -26,6 +27,9 @@ public class RateLimiter {
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private MetricsCollector metrics;
 
     private static final DefaultRedisScript<Long> TOKEN_BUCKET_SCRIPT;
     static {
@@ -57,12 +61,14 @@ public class RateLimiter {
         if (!tryAcquire(tenantBucketKey(tenantId), GovernanceConstants.RL_TENANT_CAPACITY,
                 GovernanceConstants.RL_TENANT_REFILL_PER_SEC)) {
             log.warn("租户级限流触发 tenantId={}", tenantId);
+            metrics.recordRateLimited(tenantId);
             throw new RateLimitException(ChatConstants.RATE_LIMITED_MESSAGE);
         }
         if (userId != null) {
             if (!tryAcquire(userBucketKey(tenantId, userId), GovernanceConstants.RL_USER_CAPACITY,
                     GovernanceConstants.RL_USER_REFILL_PER_SEC)) {
                 log.warn("用户级限流触发 tenantId={} userId={}", tenantId, userId);
+                metrics.recordRateLimited(tenantId);
                 throw new RateLimitException(ChatConstants.RATE_LIMITED_MESSAGE);
             }
         }
