@@ -13,6 +13,7 @@ import com.hmdp.dto.ChatResponseDTO;
 import com.hmdp.governance.FaultInjector;
 import com.hmdp.governance.LlmCircuitBreaker;
 import com.hmdp.governance.TenantBulkhead;
+import com.hmdp.metrics.MetricsCollector;
 import com.hmdp.service.IChatService;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisIdWorker;
@@ -22,6 +23,8 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.metadata.Usage;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
@@ -40,6 +43,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 /**
@@ -80,6 +84,10 @@ public class ChatServiceImpl implements IChatService {
     @Resource
     private FaultInjector faultInjector;
 
+    // ───── M7 统计看板:业务指标采集(会话量/命中率/降级/token)─────
+    @Resource
+    private MetricsCollector metrics;
+
     /** 同步 LLM 调用的有界执行器(配合超时;daemon 线程不阻塞退出)。并发上限由租户信号量约束。 */
     private final ExecutorService llmExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "llm-call");
@@ -97,11 +105,13 @@ public class ChatServiceImpl implements IChatService {
         Long kbId = request.getKbId();
         String conversationId = resolveConversationId(request.getConversationId());
 
+        metrics.recordChatRequest(tenantId);
         List<Message> history = loadHistory(tenantId, conversationId);
         boolean cacheEligible = history.isEmpty();
 
         // 1. 语义缓存短路(仅无历史单轮)
         if (cacheEligible) {
+            metrics.recordCacheEligible(tenantId);
             Optional<CachedAnswer> hit = semanticCache.lookup(tenantId, kbId, question);
             if (hit.isPresent()) {
                 return cachedResponse(tenantId, conversationId, question, hit.get());
@@ -159,10 +169,12 @@ public class ChatServiceImpl implements IChatService {
         Long kbId = request.getKbId();
         String conversationId = resolveConversationId(request.getConversationId());
 
+        metrics.recordChatRequest(tenantId);
         List<Message> history = loadHistory(tenantId, conversationId);
         boolean cacheEligible = history.isEmpty();
 
         if (cacheEligible) {
+            metrics.recordCacheEligible(tenantId);
             Optional<CachedAnswer> hit = semanticCache.lookup(tenantId, kbId, question);
             if (hit.isPresent()) {
                 return streamCached(tenantId, conversationId, question, hit.get());
@@ -201,18 +213,18 @@ public class ChatServiceImpl implements IChatService {
         if (faultInjector.isEnabled()) {
             breaker.recordFailure();
             if (ownLock) semanticCache.unlock(tenantId, kbId, question);
-            return streamDegraded(conversationId);
+            return streamDegraded(tenantId, conversationId);
         }
         // ② 熔断:跳闸中 → 直接降级流(快速失败,不打 LLM)
         if (!breaker.allow()) {
             log.warn("LLM 熔断跳闸中,流式直接降级兜底 tenantId={}", tenantId);
             if (ownLock) semanticCache.unlock(tenantId, kbId, question);
-            return streamDegraded(conversationId);
+            return streamDegraded(tenantId, conversationId);
         }
         // ③ 隔离:抢该租户信号量名额,满了 → 过载降级流
         if (!bulkhead.tryAcquire(tenantId)) {
             if (ownLock) semanticCache.unlock(tenantId, kbId, question);
-            return streamDegraded(conversationId);
+            return streamDegraded(tenantId, conversationId);
         }
 
         // 召回(embedding)也可能失败:失败即记熔断失败 + 释放名额/锁 + 降级流
@@ -224,7 +236,7 @@ public class ChatServiceImpl implements IChatService {
             breaker.recordFailure();
             bulkhead.release(tenantId);
             if (ownLock) semanticCache.unlock(tenantId, kbId, question);
-            return streamDegraded(conversationId);
+            return streamDegraded(tenantId, conversationId);
         }
         List<ChatResponseDTO.Source> sources = toSources(docs);
 
@@ -237,13 +249,22 @@ public class ChatServiceImpl implements IChatService {
                 Flux.just(ServerSentEvent.<String>builder(meta.toString()).event("meta").build());
 
         StringBuilder full = new StringBuilder();
+        // 流式同样改用 chatResponse():逐块取文本下发,并在结束时读取真实 token 用量(通常随最后一块下发)
+        AtomicReference<Usage> usageRef = new AtomicReference<>();
         Flux<ServerSentEvent<String>> tokenEvents = chatClient.prompt()
                 .system(buildSystemPrompt(docs))
                 .messages(history)
                 .user(question)
                 .stream()
-                .content()
+                .chatResponse()
                 .timeout(Duration.ofMillis(GovernanceConstants.LLM_TIMEOUT_MILLIS))
+                .doOnNext(cr -> {
+                    if (cr.getMetadata() != null && cr.getMetadata().getUsage() != null) {
+                        usageRef.set(cr.getMetadata().getUsage());
+                    }
+                })
+                .map(this::tokenText)
+                .filter(StrUtil::isNotEmpty)
                 .doOnNext(full::append)
                 .map(token -> ServerSentEvent.<String>builder(token).event("message").build());
 
@@ -251,6 +272,7 @@ public class ChatServiceImpl implements IChatService {
             String answer = full.toString();
             saveTurn(tenantId, conversationId, question, answer);
             breaker.recordSuccess();
+            recordLlmUsage(tenantId, usageRef.get());
             if (ownLock) {
                 semanticCache.save(tenantId, kbId, question, answer, sources, isAnswered(answer));
             }
@@ -262,7 +284,7 @@ public class ChatServiceImpl implements IChatService {
                     // LLM 流式出错/超时 → 记熔断失败,切降级流
                     log.error("RAG 流式回答异常,降级兜底 convId={}", conversationId, e);
                     breaker.recordFailure();
-                    return streamDegraded(conversationId);
+                    return streamDegraded(tenantId, conversationId);
                 })
                 // 不管完成/取消/异常都释放信号量名额与锁,避免泄漏/死锁
                 .doFinally(sig -> {
@@ -272,7 +294,8 @@ public class ChatServiceImpl implements IChatService {
     }
 
     /** 流式降级兜底:按 code point 逐字回放静态 FAQ 话术(保持前端流式 UX),不调用 LLM、不落历史/缓存 */
-    private Flux<ServerSentEvent<String>> streamDegraded(String conversationId) {
+    private Flux<ServerSentEvent<String>> streamDegraded(Long tenantId, String conversationId) {
+        metrics.recordDegraded(tenantId);
         JSONObject meta = new JSONObject()
                 .set("conversationId", conversationId)
                 .set("sources", List.of())
@@ -291,6 +314,7 @@ public class ChatServiceImpl implements IChatService {
     /** 流式:命中语义缓存,按缓存答案逐字下发(保持前端流式 UX 一致),不调用 LLM */
     private Flux<ServerSentEvent<String>> streamCached(Long tenantId, String conversationId,
                                                        String question, CachedAnswer cached) {
+        metrics.recordCacheHit(tenantId);
         saveTurn(tenantId, conversationId, question, cached.getAnswer());
 
         JSONObject meta = new JSONObject()
@@ -324,11 +348,11 @@ public class ChatServiceImpl implements IChatService {
         // 熔断:跳闸中直接降级(快速失败,毫秒级返回,不计失败 —— 这本就是保护)
         if (!breaker.allow()) {
             log.warn("LLM 熔断跳闸中,直接降级兜底 tenantId={}", tenantId);
-            return degraded();
+            return degraded(tenantId);
         }
         // 隔离:抢该租户信号量名额,满了 → 过载降级(chat 以兜底消化过载,不抛 503)
         if (!bulkhead.tryAcquire(tenantId)) {
-            return degraded();
+            return degraded(tenantId);
         }
         try {
             Generated g = callLlmWithTimeout(question, tenantId, kbId, history);
@@ -337,7 +361,7 @@ public class ChatServiceImpl implements IChatService {
         } catch (Exception e) {
             log.warn("LLM 生成失败/超时,降级兜底 tenantId={}", tenantId, e);
             breaker.recordFailure();
-            return degraded();
+            return degraded(tenantId);
         } finally {
             bulkhead.release(tenantId);
         }
@@ -362,17 +386,46 @@ public class ChatServiceImpl implements IChatService {
     private Generated rawGenerate(String question, Long tenantId, Long kbId, List<Message> history) {
         faultInjector.failIfEnabled();   // 演示:注入故障 → 抛错 → 计熔断失败,驱动跳闸
         List<Document> docs = retrieve(question, tenantId, kbId);
-        String answer = chatClient.prompt()
+        // 用 chatResponse() 而非 content(),以便读取真实 token 用量(M7 看板的 token 消耗指标)
+        ChatResponse resp = chatClient.prompt()
                 .system(buildSystemPrompt(docs))
                 .messages(history)
                 .user(question)
                 .call()
-                .content();
+                .chatResponse();
+        String answer = resp != null && resp.getResult() != null && resp.getResult().getOutput() != null
+                ? resp.getResult().getOutput().getText() : "";
+        recordLlmUsage(tenantId, resp != null && resp.getMetadata() != null ? resp.getMetadata().getUsage() : null);
         return new Generated(answer, toSources(docs), isAnswered(answer), false);
     }
 
+    /** 记一次成功 LLM 调用 + 累加真实 token 用量到看板(total 缺失时回退为 prompt+completion) */
+    private void recordLlmUsage(Long tenantId, Usage usage) {
+        long prompt = usage != null ? toLong(usage.getPromptTokens()) : 0;
+        long completion = usage != null ? toLong(usage.getCompletionTokens()) : 0;
+        long total = usage != null ? toLong(usage.getTotalTokens()) : 0;
+        if (total == 0) {
+            total = prompt + completion;
+        }
+        metrics.recordLlmCall(tenantId, prompt, completion, total);
+    }
+
+    private long toLong(Integer v) {
+        return v == null ? 0L : v.longValue();
+    }
+
+    /** 从流式 ChatResponse 取本块文本(空块返回 "") */
+    private String tokenText(ChatResponse cr) {
+        if (cr == null || cr.getResult() == null || cr.getResult().getOutput() == null) {
+            return "";
+        }
+        String t = cr.getResult().getOutput().getText();
+        return t == null ? "" : t;
+    }
+
     /** 降级兜底:静态 FAQ 话术(不再调 LLM/embedding,避免级联故障);degraded=true */
-    private Generated degraded() {
+    private Generated degraded(Long tenantId) {
+        metrics.recordDegraded(tenantId);
         return new Generated(ChatConstants.DEGRADE_FALLBACK_ANSWER, List.of(), false, true);
     }
 
@@ -383,6 +436,7 @@ public class ChatServiceImpl implements IChatService {
 
     /** 命中缓存的统一返回:落多轮上下文 + 标记 cached=true */
     private ChatResponseDTO cachedResponse(Long tenantId, String conversationId, String question, CachedAnswer cached) {
+        metrics.recordCacheHit(tenantId);
         saveTurn(tenantId, conversationId, question, cached.getAnswer());
         return new ChatResponseDTO(conversationId, cached.getAnswer(), cached.getSources(), true, false);
     }
