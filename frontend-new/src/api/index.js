@@ -8,6 +8,12 @@ export const authApi = {
   logout: () => http.post('/auth/logout')
 }
 
+// ─────────────── 匿名访客挂件(免登录)───────────────
+export const visitorApi = {
+  // 按租户编码领取游客会话:{ token, nickName, tenantName }
+  session: (tenant) => http.post(`/visitor/session?tenant=${encodeURIComponent(tenant)}`)
+}
+
 // ─────────────── 知识库 + 文档摄入(M1/M2)───────────────
 export const kbApi = {
   list: () => http.get('/kb/list'),

@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useAuthStore } from '@/store/auth'
+import { resolveToken } from '@/api/token'
 
 // 工单实时会话(M6):/ws/chat?ticketId=&token=
 //   - 握手鉴权:token 走 query(浏览器 WS 不便带 header),后端校验登录态 + 参与方 + 工单未结束。
@@ -8,7 +8,6 @@ import { useAuthStore } from '@/store/auth'
 //   - 接收:后端广播完整 WsMessage JSON {type, ticketId, senderRole, senderId, senderName, content, timestamp}。
 // 访客侧(Chat)与坐席侧(AgentDesk)共用本组合式函数。
 export function useTicketSocket() {
-  const auth = useAuthStore()
   const messages = ref([]) // 已收到的 WsMessage
   const connected = ref(false)
   let ws = null
@@ -21,7 +20,7 @@ export function useTicketSocket() {
 
     // 经 Vite 代理(ws:true);用当前页面 host,协议跟随 http/https
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const url = `${proto}://${location.host}/ws/chat?ticketId=${ticketId}&token=${encodeURIComponent(auth.token)}`
+    const url = `${proto}://${location.host}/ws/chat?ticketId=${ticketId}&token=${encodeURIComponent(resolveToken())}`
     ws = new WebSocket(url)
 
     ws.onopen = () => {

@@ -4,6 +4,8 @@ import { useAuthStore } from '@/store/auth'
 const routes = [
   { path: '/login', name: 'login', component: () => import('@/views/Login.vue'), meta: { public: true } },
   { path: '/register', name: 'register', component: () => import('@/views/Register.vue'), meta: { public: true } },
+  // 匿名访客挂件:独立全屏页,免登录(进入时自领游客会话)。?tenant=acme 指定租户
+  { path: '/widget', name: 'widget', component: () => import('@/views/Widget.vue'), meta: { public: true, standalone: true } },
   {
     path: '/',
     component: () => import('@/layouts/MainLayout.vue'),
@@ -37,7 +39,8 @@ router.beforeEach((to) => {
   if (to.meta.adminOnly && !auth.isAdmin) {
     return { name: 'chat' }
   }
-  if (to.meta.public && auth.isLoggedIn) {
+  // 独立页(访客挂件)始终放行,不受后台登录态影响 —— 支持后台 + 访客同浏览器双开
+  if (to.meta.public && auth.isLoggedIn && !to.meta.standalone) {
     return { name: 'chat' }
   }
   return true

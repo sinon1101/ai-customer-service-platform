@@ -15,6 +15,7 @@ import com.hmdp.service.ISysUserService;
 import com.hmdp.service.ITenantService;
 import com.hmdp.utils.PasswordEncoder;
 import com.hmdp.utils.RedisConstants;
+import com.hmdp.utils.RedisIdWorker;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -39,6 +40,8 @@ public class AuthServiceImpl implements IAuthService {
     private ISysUserService sysUserService;
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+    @Resource
+    private RedisIdWorker redisIdWorker;
 
     @Override
     @Transactional
@@ -94,21 +97,13 @@ public class AuthServiceImpl implements IAuthService {
             return Result.fail("所属租户不可用");
         }
         // 生成 token,登录态(含 tenantId)存入 Redis Hash
-        String token = UUID.randomUUID().toString(true);
         LoginUser loginUser = new LoginUser();
         loginUser.setId(user.getId());
         loginUser.setTenantId(user.getTenantId());
         loginUser.setUsername(user.getUsername());
         loginUser.setNickName(user.getNickName());
         loginUser.setRole(user.getRole());
-
-        Map<String, Object> userMap = BeanUtil.beanToMap(loginUser, new HashMap<>(), CopyOptions.create()
-                .setIgnoreNullValue(true)
-                .setFieldValueEditor((name, value) -> value == null ? null : value.toString()));
-        String key = RedisConstants.LOGIN_USER_KEY + token;
-        stringRedisTemplate.opsForHash().putAll(key, userMap);
-        stringRedisTemplate.expire(key, RedisConstants.LOGIN_USER_TTL, TimeUnit.HOURS);
-        return Result.ok(token);
+        return Result.ok(issueToken(loginUser));
     }
 
     @Override
@@ -117,5 +112,44 @@ public class AuthServiceImpl implements IAuthService {
             stringRedisTemplate.delete(RedisConstants.LOGIN_USER_KEY + token);
         }
         return Result.ok();
+    }
+
+    @Override
+    public Result visitorSession(String tenantCode) {
+        if (StrUtil.isBlank(tenantCode)) {
+            return Result.fail("缺少租户编码");
+        }
+        Tenant tenant = tenantService.lambdaQuery().eq(Tenant::getCode, tenantCode).one();
+        if (tenant == null || tenant.getStatus() == null || tenant.getStatus() != 1) {
+            return Result.fail("租户不存在或已停用");
+        }
+        // 游客身份:无账号密码,id 由 RedisIdWorker 分配(与 sys_user 自增 id 空间天然不重叠)
+        long visitorId = redisIdWorker.nextId("visitor");
+        String suffix = String.valueOf(visitorId % 10000);
+        LoginUser visitor = new LoginUser();
+        visitor.setId(visitorId);
+        visitor.setTenantId(tenant.getId());
+        visitor.setUsername("guest_" + visitorId);
+        visitor.setNickName("访客" + suffix);
+        visitor.setRole("VISITOR");
+        String token = issueToken(visitor);
+        log.info("发放游客会话 tenantCode={} tenantId={} visitorId={}", tenantCode, tenant.getId(), visitorId);
+        Map<String, Object> data = new HashMap<>();
+        data.put("token", token);
+        data.put("nickName", visitor.getNickName());
+        data.put("tenantName", tenant.getName());
+        return Result.ok(data);
+    }
+
+    /** 把登录态写入 Redis token Hash 并设 TTL,返回原始 token(登录与游客会话共用) */
+    private String issueToken(LoginUser loginUser) {
+        String token = UUID.randomUUID().toString(true);
+        Map<String, Object> userMap = BeanUtil.beanToMap(loginUser, new HashMap<>(), CopyOptions.create()
+                .setIgnoreNullValue(true)
+                .setFieldValueEditor((name, value) -> value == null ? null : value.toString()));
+        String key = RedisConstants.LOGIN_USER_KEY + token;
+        stringRedisTemplate.opsForHash().putAll(key, userMap);
+        stringRedisTemplate.expire(key, RedisConstants.LOGIN_USER_TTL, TimeUnit.HOURS);
+        return token;
     }
 }

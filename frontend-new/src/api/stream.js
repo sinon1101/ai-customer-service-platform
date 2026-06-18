@@ -1,4 +1,6 @@
 import { useAuthStore } from '@/store/auth'
+import { useVisitorStore } from '@/store/visitor'
+import { resolveToken } from '@/api/token'
 
 // POST /chat/stream 是 SSE,但 EventSource 只支持 GET,故用 fetch + ReadableStream 手动解析。
 // 后端事件协议(见 ChatServiceImpl):
@@ -11,21 +13,25 @@ import { useAuthStore } from '@/store/auth'
 //   onMeta(metaObj) / onToken(text) / onDone() / onError(msg)
 // 返回一个带 .abort() 的句柄,便于组件卸载时中断。
 export function streamChat(req, { onMeta, onToken, onDone, onError } = {}) {
-  const auth = useAuthStore()
   const controller = new AbortController()
 
   fetch('/api/chat/stream', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      authorization: auth.token || ''
+      authorization: resolveToken()
     },
     body: JSON.stringify(req),
     signal: controller.signal
   })
     .then(async (resp) => {
       if (!resp.ok) {
-        if (resp.status === 401) auth.clear()
+        if (resp.status === 401) {
+          // 访客挂件清访客会话,后台清登录态(避免互相误清)
+          const visitor = useVisitorStore()
+          if (visitor.token) visitor.clear()
+          else useAuthStore().clear()
+        }
         onError && onError(`请求失败(HTTP ${resp.status})`)
         return
       }

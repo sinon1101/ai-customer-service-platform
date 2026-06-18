@@ -46,3 +46,8 @@ deploy/**/data/
 ### 系统文件 ###
 .DS_Store
 Thumbs.db
+
+# 本地运行日志(后端/前端 dev)
+*.log
+backend/app-*.log
+frontend-new/vite-dev.log

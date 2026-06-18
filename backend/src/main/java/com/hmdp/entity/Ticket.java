@@ -3,6 +3,8 @@ package com.hmdp.entity;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import lombok.Data;
 import lombok.experimental.Accessors;
 
@@ -23,6 +25,8 @@ public class Ticket implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
+    // 雪花 ID 超过 JS Number 安全整数范围(2^53),必须以字符串返回前端,否则末位精度丢失
+    @JsonSerialize(using = ToStringSerializer.class)
     @TableId(value = "id", type = IdType.INPUT)
     private Long id;
 
@@ -35,7 +39,8 @@ public class Ticket implements Serializable {
     /** 关联知识库(可空) */
     private Long kbId;
 
-    /** 访客(发起转人工的登录账号) */
+    /** 访客(发起转人工的登录账号;游客为雪花 ID,同样以字符串返回) */
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long visitorUserId;
 
     /** 访客昵称(冗余) */
