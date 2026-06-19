@@ -3,7 +3,9 @@ package com.hmdp.ws;
 import cn.hutool.core.util.StrUtil;
 import com.hmdp.constant.TicketConstants;
 import com.hmdp.dto.WsMessage;
+import com.hmdp.entity.Ticket;
 import com.hmdp.service.IChatMessageService;
+import com.hmdp.service.ITicketService;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -32,6 +34,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     @Resource
     private IChatMessageService chatMessageService;
 
+    @Resource
+    private ITicketService ticketService;
+
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         registry.add(ticketId(session), session);
@@ -45,6 +50,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
         Long ticketId = ticketId(session);
         Long tenantId = (Long) session.getAttributes().get(WsHandshakeInterceptor.ATTR_TENANT_ID);
+        // 会话已结束则忽略入站消息(防止主动断连信号到达前的瞬间抢发)
+        Ticket ticket = ticketService.findOwned(ticketId, tenantId);
+        if (ticket == null || TicketConstants.STATUS_CLOSED.equals(ticket.getStatus())) {
+            return;
+        }
         String role = (String) session.getAttributes().get(WsHandshakeInterceptor.ATTR_SENDER_ROLE);
         Long senderId = (Long) session.getAttributes().get(WsHandshakeInterceptor.ATTR_SENDER_ID);
         String senderName = (String) session.getAttributes().get(WsHandshakeInterceptor.ATTR_SENDER_NAME);

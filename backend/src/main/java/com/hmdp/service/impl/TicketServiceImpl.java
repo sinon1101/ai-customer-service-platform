@@ -145,7 +145,7 @@ public class TicketServiceImpl extends ServiceImpl<TicketMapper, Ticket> impleme
             Ticket t = getById(ticketId);
             log.info("坐席抢单成功 ticketId={} agentId={} tenantId={}", ticketId, agent.getId(), tenantId);
             // 系统提示:坐席已接入(落库 + 实时推给访客)
-            publishSystem(t, String.format(TicketConstants.SYS_AGENT_JOINED,
+            publishSystem(t, TicketConstants.MSG_TYPE_SYSTEM, String.format(TicketConstants.SYS_AGENT_JOINED,
                     StrUtil.blankToDefault(agent.getNickName(), agent.getUsername())));
             return Result.ok(t);
         } finally {
@@ -178,7 +178,8 @@ public class TicketServiceImpl extends ServiceImpl<TicketMapper, Ticket> impleme
                 .set(Ticket::getCloseTime, LocalDateTime.now())
                 .update();
         t.setStatus(TicketConstants.STATUS_CLOSED);
-        publishSystem(t, TicketConstants.SYS_TICKET_CLOSED);
+        // 结束信号:type=CLOSED —— 各实例收到后投递这条提示并主动断开该工单的所有 WS 连接
+        publishSystem(t, TicketConstants.MSG_TYPE_CLOSED, TicketConstants.SYS_TICKET_CLOSED);
         return Result.ok();
     }
 
@@ -231,12 +232,12 @@ public class TicketServiceImpl extends ServiceImpl<TicketMapper, Ticket> impleme
                 .one();
     }
 
-    /** 记一条系统提示并实时推给该工单的所有参与方 */
-    private void publishSystem(Ticket t, String content) {
+    /** 记一条系统提示并实时推给该工单的所有参与方(type 区分:SYSTEM 普通提示 / CLOSED 结束信号) */
+    private void publishSystem(Ticket t, String type, String content) {
         chatMessageService.record(t.getTenantId(), t.getId(),
                 TicketConstants.SENDER_SYSTEM, null, "系统", content);
         relay.publish(t.getId(), new WsMessage(
-                TicketConstants.MSG_TYPE_SYSTEM, t.getId(),
+                type, t.getId(),
                 TicketConstants.SENDER_SYSTEM, null, "系统", content, System.currentTimeMillis()));
     }
 

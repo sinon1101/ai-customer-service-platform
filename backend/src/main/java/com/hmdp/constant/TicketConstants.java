@@ -25,7 +25,8 @@ public class TicketConstants {
 
     // ───────────────── 消息类型(WsMessage.type)─────────────────
     public static final String MSG_TYPE_CHAT = "CHAT";     // 普通聊天消息
-    public static final String MSG_TYPE_SYSTEM = "SYSTEM"; // 系统提示(坐席接入/会话结束)
+    public static final String MSG_TYPE_SYSTEM = "SYSTEM"; // 系统提示(坐席接入)
+    public static final String MSG_TYPE_CLOSED = "CLOSED"; // 会话结束信号(收到后各实例主动断开该工单连接)
 
     // ───────────────── WebSocket / Redis Pub/Sub ─────────────────
     /** WebSocket 端点路径(握手时带 ?ticketId=&token=) */

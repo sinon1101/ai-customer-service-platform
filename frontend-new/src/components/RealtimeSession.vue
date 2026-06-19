@@ -85,8 +85,17 @@ async function init(id) {
     /* 拦截器已提示 */
   }
   if (ticket.value?.status !== 'CLOSED') {
-    connect(id, { onMessage: scrollToBottom })
+    connect(id, { onMessage: onRealtime })
   }
+}
+
+// 收到实时消息:若是「会话结束」信号(对方或自己关闭),即时标记 CLOSED 并断开,禁用输入
+function onRealtime(m) {
+  if (m.type === 'CLOSED') {
+    if (ticket.value) ticket.value.status = 'CLOSED'
+    close()
+  }
+  scrollToBottom()
 }
 
 function onSend() {

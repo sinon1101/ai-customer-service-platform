@@ -10,6 +10,7 @@ import org.springframework.data.redis.connection.Message;
 import org.springframework.data.redis.connection.MessageListener;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 
@@ -50,6 +51,8 @@ public class TicketMessageRelay implements MessageListener {
         if (ticketId == null) {
             return;
         }
+        // 会话结束信号:投递这条「已结束」提示后,主动断开本机持有的该工单所有连接
+        boolean closing = TicketConstants.MSG_TYPE_CLOSED.equals(parseType(body));
         TextMessage frame = new TextMessage(body);
         for (WebSocketSession session : registry.sessions(ticketId)) {
             if (!session.isOpen()) {
@@ -59,10 +62,22 @@ public class TicketMessageRelay implements MessageListener {
                 // WebSocketSession 非线程安全,并发投递需对单连接串行化
                 synchronized (session) {
                     session.sendMessage(frame);
+                    if (closing) {
+                        session.close(CloseStatus.NORMAL);
+                    }
                 }
             } catch (Exception e) {
                 log.warn("WS 消息投递失败 ticketId={} sessionId={}", ticketId, session.getId(), e);
             }
+        }
+    }
+
+    /** 从消息体解析 type(失败返回 null,不影响普通投递) */
+    private String parseType(String body) {
+        try {
+            return JSONUtil.parseObj(body).getStr("type");
+        } catch (Exception e) {
+            return null;
         }
     }
 
