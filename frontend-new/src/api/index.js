@@ -20,6 +20,7 @@ export const kbApi = {
   get: (id) => http.get(`/kb/${id}`),
   create: (form) => http.post('/kb', form),
   update: (id, form) => http.put(`/kb/${id}`, form),
+  setStatus: (id, status) => http.put(`/kb/${id}/status?status=${status}`),
   remove: (id) => http.delete(`/kb/${id}`),
   uploadDoc: (kbId, form) => http.post(`/kb/${kbId}/documents`, form),
   listDocs: (kbId) => http.get(`/kb/${kbId}/documents`)

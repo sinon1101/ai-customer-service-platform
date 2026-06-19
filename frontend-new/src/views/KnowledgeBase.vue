@@ -17,10 +17,14 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="240" align="center">
+      <el-table-column label="操作" width="320" align="center">
         <template #default="{ row }">
           <el-button size="small" type="primary" link :icon="Document" @click="openDocs(row)">文档</el-button>
           <el-button size="small" link :icon="Edit" @click="openEdit(row)">编辑</el-button>
+          <el-button v-if="row.status === 1" size="small" type="warning" link :icon="TurnOff"
+            @click="onToggleStatus(row)">禁用</el-button>
+          <el-button v-else size="small" type="success" link :icon="Open"
+            @click="onToggleStatus(row)">启用</el-button>
           <el-button size="small" type="danger" link :icon="Delete" @click="onDelete(row)">删除</el-button>
         </template>
       </el-table-column>
@@ -89,7 +93,7 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Edit, Delete, Document, Upload, Loading } from '@element-plus/icons-vue'
+import { Plus, Edit, Delete, Document, Upload, Loading, TurnOff, Open } from '@element-plus/icons-vue'
 import { kbApi } from '@/api'
 
 const list = ref([])
@@ -150,6 +154,19 @@ async function onSave() {
   } finally {
     saving.value = false
   }
+}
+async function onToggleStatus(row) {
+  const disabling = row.status === 1
+  const next = disabling ? 0 : 1
+  if (disabling) {
+    await ElMessageBox.confirm(
+      `禁用知识库「${row.name}」后,它将不再参与智能问答的检索召回。确定禁用?`,
+      '提示', { type: 'warning' }
+    )
+  }
+  await kbApi.setStatus(row.id, next)
+  ElMessage.success(disabling ? '已禁用' : '已启用')
+  loadList()
 }
 async function onDelete(row) {
   await ElMessageBox.confirm(`确定删除知识库「${row.name}」?`, '提示', { type: 'warning' })

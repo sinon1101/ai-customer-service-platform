@@ -15,6 +15,7 @@ import com.hmdp.governance.LlmCircuitBreaker;
 import com.hmdp.governance.TenantBulkhead;
 import com.hmdp.metrics.MetricsCollector;
 import com.hmdp.service.IChatService;
+import com.hmdp.service.IKnowledgeBaseService;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisIdWorker;
 import jakarta.annotation.Resource;
@@ -67,6 +68,9 @@ public class ChatServiceImpl implements IChatService {
 
     @Resource
     private SemanticCache semanticCache;
+
+    @Resource
+    private IKnowledgeBaseService knowledgeBaseService;
 
     @Resource
     private org.springframework.data.redis.core.StringRedisTemplate stringRedisTemplate;
@@ -443,12 +447,29 @@ public class ChatServiceImpl implements IChatService {
 
     // ───────────────────── 召回 / Prompt / 溯源 ─────────────────────
 
-    /** 向量召回:按租户(及可选知识库)过滤的 Top-K 相似片段 */
+    /**
+     * 向量召回:按租户(及可选知识库)过滤的 Top-K 相似片段。
+     * <p>
+     * 仅在<b>启用中</b>的知识库内召回(禁用库不参与问答):
+     * - 指定了 kbId 但该库被禁用 → 直接返回空(等同查无此库,模型据此答「未找到」可转人工);
+     * - kbId 为空(全库)→ 取该租户所有启用库的 id,用 TAG {@code in} 限定召回范围;一个启用库都没有则返回空。
+     * status 以 DB 为唯一事实源,向量库不存 status,故无需重建索引。
+     */
     private List<Document> retrieve(String question, Long tenantId, Long kbId) {
         FilterExpressionBuilder fb = new FilterExpressionBuilder();
         FilterExpressionBuilder.Op filter = fb.eq("tenantId", String.valueOf(tenantId));
         if (kbId != null) {
+            if (!knowledgeBaseService.isEnabled(kbId, tenantId)) {
+                return List.of();
+            }
             filter = fb.and(filter, fb.eq("kbId", String.valueOf(kbId)));
+        } else {
+            List<Long> enabledKbIds = knowledgeBaseService.listEnabledIds(tenantId);
+            if (enabledKbIds.isEmpty()) {
+                return List.of();
+            }
+            Object[] kbIdStrs = enabledKbIds.stream().map(String::valueOf).toArray();
+            filter = fb.and(filter, fb.in("kbId", kbIdStrs));
         }
         SearchRequest req = SearchRequest.builder()
                 .query(question)
