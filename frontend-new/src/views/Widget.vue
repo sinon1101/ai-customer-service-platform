@@ -65,7 +65,7 @@
 
     <!-- 转人工后:实时会话抽屉 -->
     <el-drawer v-model="humanVisible" title="人工坐席会话" size="480px" :destroy-on-close="true">
-      <RealtimeSession v-if="ticketId" :ticket-id="ticketId" @closed="humanVisible = false" />
+      <RealtimeSession v-if="ticketId" :ticket-id="ticketId" self-role="VISITOR" @closed="humanVisible = false" />
     </el-drawer>
   </div>
 </template>

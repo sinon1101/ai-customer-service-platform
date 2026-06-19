@@ -53,7 +53,7 @@
       <!-- 右:实时会话 -->
       <el-card class="session-panel" shadow="never">
         <RealtimeSession v-if="activeTicketId" :key="activeTicketId" :ticket-id="activeTicketId"
-          @closed="onSessionClosed" />
+          self-role="AGENT" @closed="onSessionClosed" />
         <div v-else class="empty muted session-empty">
           <el-icon :size="40"><ChatLineRound /></el-icon>
           <p>从左侧抢单或选择「我的会话」开始实时对话</p>

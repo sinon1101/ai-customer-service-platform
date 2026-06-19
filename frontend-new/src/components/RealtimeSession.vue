@@ -54,7 +54,10 @@ import { useTicketSocket } from '@/composables/useTicketSocket'
 const props = defineProps({
   ticketId: { type: [Number, String], required: true },
   // 是否显示「结束会话」按钮(访客与接单坐席都可结束)
-  canClose: { type: Boolean, default: true }
+  canClose: { type: Boolean, default: true },
+  // 当前视角的角色:'AGENT'(坐席端)或 'VISITOR'(访客端)。
+  // 决定气泡左右——「自己」永远在右,对方在左。
+  selfRole: { type: String, default: 'AGENT' }
 })
 const emit = defineEmits(['closed'])
 
@@ -107,7 +110,8 @@ function scrollToBottom() {
 }
 function rowClass(m) {
   if (m.senderRole === 'SYSTEM') return 'center'
-  return m.senderRole === 'AGENT' ? 'right' : 'left'
+  // 「自己」发的靠右,对方靠左 —— 访客端与坐席端视角各自正确
+  return m.senderRole === props.selfRole ? 'right' : 'left'
 }
 function roleText(r) {
   return { VISITOR: '访客', AGENT: '坐席', SYSTEM: '系统' }[r] || r
