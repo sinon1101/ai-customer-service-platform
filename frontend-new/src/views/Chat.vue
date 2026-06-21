@@ -18,6 +18,7 @@
         <div v-if="!messages.length" class="welcome">
           <el-icon :size="40" color="#409eff"><ChatDotRound /></el-icon>
           <p>你好,我是 AI 客服助手。基于知识库为你解答 —— 试试提问吧。</p>
+          <p class="muted hint">内部调试台:可见语义缓存命中 / 降级兜底 / 引用溯源等可观测信息。面向真实访客的入口是访客挂件 <code>/widget</code>。</p>
           <p class="muted" v-if="conversationId">会话 ID:{{ conversationId }}</p>
         </div>
 
@@ -86,6 +87,36 @@ const conversationId = ref(null)
 const listEl = ref()
 let lastQuestion = ''
 
+// 会话本地持久化:刷新/切换页面后自动恢复当前会话(后端 Redis 也存 30 分钟多轮上下文,
+// 这里只负责前端把可见对话还原回来)。
+const STORAGE_KEY = 'aics_chat_session'
+function persist() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      conversationId: conversationId.value,
+      kbId: kbId.value,
+      // 不持久化「思考中」的半成品流式态
+      messages: messages.map((m) => ({ ...m, streaming: false }))
+    }))
+  } catch {
+    /* localStorage 不可用时忽略 */
+  }
+}
+function restore() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return
+    const s = JSON.parse(raw)
+    conversationId.value = s.conversationId || null
+    kbId.value = s.kbId ?? null
+    if (Array.isArray(s.messages)) {
+      s.messages.forEach((m) => messages.push({ ...m, streaming: false }))
+    }
+  } catch {
+    /* 解析失败则忽略,当作新会话 */
+  }
+}
+
 const transferring = ref(false)
 const humanVisible = ref(false)
 const ticketId = ref(null)
@@ -109,6 +140,7 @@ function onSend() {
     role: 'assistant', content: '', sources: [], cached: false, degraded: false, streaming: true
   })
   messages.push(assistant)
+  persist()
   scrollToBottom()
   sending.value = true
 
@@ -128,12 +160,14 @@ function onSend() {
       onDone: () => {
         assistant.streaming = false
         sending.value = false
+        persist()
         scrollToBottom()
       },
       onError: (msg) => {
         assistant.streaming = false
         assistant.content = assistant.content || `[出错] ${msg}`
         sending.value = false
+        persist()
       }
     }
   )
@@ -162,6 +196,11 @@ function resetConversation() {
   messages.splice(0, messages.length)
   conversationId.value = null
   lastQuestion = ''
+  try {
+    localStorage.removeItem(STORAGE_KEY)
+  } catch {
+    /* ignore */
+  }
 }
 
 function scrollToBottom() {
@@ -170,7 +209,10 @@ function scrollToBottom() {
   })
 }
 
-onMounted(loadKbs)
+onMounted(() => {
+  restore()
+  loadKbs()
+})
 </script>
 
 <style scoped>
@@ -201,6 +243,17 @@ onMounted(loadKbs)
   text-align: center;
   margin-top: 60px;
   color: #606266;
+}
+.welcome .hint {
+  font-size: 12px;
+  max-width: 460px;
+  margin: 8px auto 0;
+  line-height: 1.6;
+}
+.welcome .hint code {
+  background: #f0f2f5;
+  padding: 1px 5px;
+  border-radius: 3px;
 }
 .msg {
   display: flex;

@@ -80,13 +80,28 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="错误" min-width="100">
+        <el-table-column label="错误" min-width="90">
           <template #default="{ row }">
             <span class="muted" v-if="row.errorMsg">{{ row.errorMsg }}</span>
           </template>
         </el-table-column>
+        <el-table-column label="操作" width="70" align="center">
+          <template #default="{ row }">
+            <el-button size="small" type="primary" link @click="openContent(row)">查看</el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </el-drawer>
+
+    <!-- 文档原文查看 -->
+    <el-dialog v-model="contentVisible" :title="`文档原文 — ${contentDoc?.name || ''}`" width="640px" top="6vh">
+      <div v-loading="contentLoading">
+        <div class="content-meta muted" v-if="contentDoc">
+          类型 {{ contentDoc.sourceType }} · {{ contentDoc.charCount }} 字符 · {{ contentDoc.chunkCount }} 切片
+        </div>
+        <pre class="content-body">{{ contentDoc?.content }}</pre>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -110,6 +125,10 @@ const docs = ref([])
 const uploading = ref(false)
 const docForm = reactive({ name: '', sourceType: 'TEXT', content: '' })
 let pollTimer = null
+
+const contentVisible = ref(false)
+const contentLoading = ref(false)
+const contentDoc = ref(null)
 
 async function loadList() {
   loading.value = true
@@ -214,6 +233,20 @@ async function onUpload() {
   }
 }
 
+async function openContent(row) {
+  contentDoc.value = { ...row, content: '' }
+  contentVisible.value = true
+  contentLoading.value = true
+  try {
+    const { data } = await kbApi.getDoc(row.id)
+    contentDoc.value = data
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    contentLoading.value = false
+  }
+}
+
 // 有 PENDING/PROCESSING 文档时每 2s 轮询一次进度
 function schedulePolling() {
   stopPolling()
@@ -255,6 +288,24 @@ onUnmounted(stopPolling)
 .doc-upload .upload-hint {
   margin-left: 12px;
   font-size: 12px;
+}
+.content-meta {
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.content-body {
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f7f8fa;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  font-family: inherit;
 }
 .spin {
   animation: rotate 1s linear infinite;

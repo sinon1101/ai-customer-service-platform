@@ -8,7 +8,7 @@
       <el-menu :default-active="$route.path" router class="menu" background-color="#1f2937"
         text-color="#cbd5e1" active-text-color="#fff">
         <el-menu-item index="/chat">
-          <el-icon><Comment /></el-icon><span>智能问答</span>
+          <el-icon><Comment /></el-icon><span>问答调试台</span>
         </el-menu-item>
         <el-menu-item index="/kb">
           <el-icon><Collection /></el-icon><span>知识库管理</span>

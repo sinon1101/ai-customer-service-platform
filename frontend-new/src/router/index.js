@@ -11,7 +11,7 @@ const routes = [
     component: () => import('@/layouts/MainLayout.vue'),
     redirect: '/chat',
     children: [
-      { path: 'chat', name: 'chat', component: () => import('@/views/Chat.vue'), meta: { title: '智能问答' } },
+      { path: 'chat', name: 'chat', component: () => import('@/views/Chat.vue'), meta: { title: '问答调试台' } },
       { path: 'kb', name: 'kb', component: () => import('@/views/KnowledgeBase.vue'), meta: { title: '知识库管理' } },
       { path: 'agent', name: 'agent', component: () => import('@/views/AgentDesk.vue'), meta: { title: '坐席工作台' } },
       {

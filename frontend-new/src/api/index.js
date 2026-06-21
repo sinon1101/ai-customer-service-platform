@@ -23,7 +23,8 @@ export const kbApi = {
   setStatus: (id, status) => http.put(`/kb/${id}/status?status=${status}`),
   remove: (id) => http.delete(`/kb/${id}`),
   uploadDoc: (kbId, form) => http.post(`/kb/${kbId}/documents`, form),
-  listDocs: (kbId) => http.get(`/kb/${kbId}/documents`)
+  listDocs: (kbId) => http.get(`/kb/${kbId}/documents`),
+  getDoc: (docId) => http.get(`/kb/documents/${docId}`)
 }
 
 // ─────────────── RAG 问答(M3/M4)───────────────

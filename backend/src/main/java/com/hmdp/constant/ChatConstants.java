@@ -35,9 +35,10 @@ public class ChatConstants {
 
     /**
      * 降级兜底话术(M5):LLM 被熔断 / 超时 / 失败 / 信号量过载时返回。
-     * 用静态话术兜底(不在降级时再调一次 LLM/embedding,避免级联故障);真实转人工工单留给 M6。
+     * 用静态话术兜底(不在降级时再调一次 LLM/embedding,避免级联故障)。
+     * 注意:此处不做真实转人工(不自动建单),仅提示用户可手动点「转人工」,文案不承诺已转接。
      */
-    public static final String DEGRADE_FALLBACK_ANSWER = "抱歉,当前 AI 客服繁忙,已为您转接人工客服,请稍候。";
+    public static final String DEGRADE_FALLBACK_ANSWER = "抱歉,当前 AI 客服繁忙,暂时无法作答。请稍后再试,或点击「转人工」联系人工客服。";
 
     private ChatConstants() {
     }
