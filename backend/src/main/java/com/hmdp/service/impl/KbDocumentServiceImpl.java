@@ -103,6 +103,15 @@ public class KbDocumentServiceImpl extends ServiceImpl<KbDocumentMapper, KbDocum
     }
 
     @Override
+    public Result detail(Long docId) {
+        KbDocument doc = getOwned(docId);
+        if (doc == null) {
+            return Result.fail("文档不存在");
+        }
+        return Result.ok(doc);
+    }
+
+    @Override
     public KbDocument getOwned(Long docId) {
         Long tenantId = UserContext.getTenantId();
         return lambdaQuery()

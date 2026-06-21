@@ -30,6 +30,8 @@ public class MvcConfig implements WebMvcConfigurer {
                 .excludePathPatterns(
                         "/auth/login",
                         "/auth/register",
+                        // 匿名访客领取游客会话(挂件入口),公开
+                        "/visitor/session",
                         // WebSocket 握手鉴权在 WsHandshakeInterceptor(query token),不走 HTTP 登录拦截器
                         "/ws/**"
                 )

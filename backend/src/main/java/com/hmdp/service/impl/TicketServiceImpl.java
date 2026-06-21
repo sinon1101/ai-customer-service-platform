@@ -58,17 +58,18 @@ public class TicketServiceImpl extends ServiceImpl<TicketMapper, Ticket> impleme
         Long tenantId = visitor.getTenantId();
         String conversationId = form.getConversationId();
 
-        // 幂等:同对话已有未结束工单 → 直接返回它,避免一通转人工建出多张单
-        if (StrUtil.isNotBlank(conversationId)) {
-            Ticket existing = lambdaQuery()
-                    .eq(Ticket::getTenantId, tenantId)
-                    .eq(Ticket::getConversationId, conversationId)
-                    .in(Ticket::getStatus, TicketConstants.STATUS_WAITING, TicketConstants.STATUS_ASSIGNED)
-                    .last("LIMIT 1")
-                    .one();
-            if (existing != null) {
-                return Result.ok(existing);
-            }
+        // 幂等:同一访客只要还有未结束(WAITING/ASSIGNED)的工单就复用,不重复建单。
+        // 注意:不能只按 conversationId 判,因为访客没和 AI 对话就直接转人工时 conversationId 为空,
+        // 那样会跳过幂等、每点一次建一张新单。改按 visitorUserId,conversationId 有无都能正确去重。
+        Ticket existing = lambdaQuery()
+                .eq(Ticket::getTenantId, tenantId)
+                .eq(Ticket::getVisitorUserId, visitor.getId())
+                .in(Ticket::getStatus, TicketConstants.STATUS_WAITING, TicketConstants.STATUS_ASSIGNED)
+                .orderByDesc(Ticket::getCreateTime)
+                .last("LIMIT 1")
+                .one();
+        if (existing != null) {
+            return Result.ok(existing);
         }
 
         String reason = StrUtil.isNotBlank(form.getReason()) ? form.getReason() : TicketConstants.REASON_USER_REQUEST;
@@ -145,7 +146,7 @@ public class TicketServiceImpl extends ServiceImpl<TicketMapper, Ticket> impleme
             Ticket t = getById(ticketId);
             log.info("坐席抢单成功 ticketId={} agentId={} tenantId={}", ticketId, agent.getId(), tenantId);
             // 系统提示:坐席已接入(落库 + 实时推给访客)
-            publishSystem(t, String.format(TicketConstants.SYS_AGENT_JOINED,
+            publishSystem(t, TicketConstants.MSG_TYPE_SYSTEM, String.format(TicketConstants.SYS_AGENT_JOINED,
                     StrUtil.blankToDefault(agent.getNickName(), agent.getUsername())));
             return Result.ok(t);
         } finally {
@@ -178,7 +179,8 @@ public class TicketServiceImpl extends ServiceImpl<TicketMapper, Ticket> impleme
                 .set(Ticket::getCloseTime, LocalDateTime.now())
                 .update();
         t.setStatus(TicketConstants.STATUS_CLOSED);
-        publishSystem(t, TicketConstants.SYS_TICKET_CLOSED);
+        // 结束信号:type=CLOSED —— 各实例收到后投递这条提示并主动断开该工单的所有 WS 连接
+        publishSystem(t, TicketConstants.MSG_TYPE_CLOSED, TicketConstants.SYS_TICKET_CLOSED);
         return Result.ok();
     }
 
@@ -231,12 +233,12 @@ public class TicketServiceImpl extends ServiceImpl<TicketMapper, Ticket> impleme
                 .one();
     }
 
-    /** 记一条系统提示并实时推给该工单的所有参与方 */
-    private void publishSystem(Ticket t, String content) {
+    /** 记一条系统提示并实时推给该工单的所有参与方(type 区分:SYSTEM 普通提示 / CLOSED 结束信号) */
+    private void publishSystem(Ticket t, String type, String content) {
         chatMessageService.record(t.getTenantId(), t.getId(),
                 TicketConstants.SENDER_SYSTEM, null, "系统", content);
         relay.publish(t.getId(), new WsMessage(
-                TicketConstants.MSG_TYPE_SYSTEM, t.getId(),
+                type, t.getId(),
                 TicketConstants.SENDER_SYSTEM, null, "系统", content, System.currentTimeMillis()));
     }
 

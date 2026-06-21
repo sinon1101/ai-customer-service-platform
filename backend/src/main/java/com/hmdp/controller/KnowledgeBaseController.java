@@ -41,6 +41,12 @@ public class KnowledgeBaseController {
         return knowledgeBaseService.update(id, form);
     }
 
+    /** 启用/禁用知识库(status:1启用 0禁用)。禁用后该库不再参与 RAG 召回。 */
+    @PutMapping("/{id}/status")
+    public Result setStatus(@PathVariable("id") Long id, @RequestParam("status") Integer status) {
+        return knowledgeBaseService.setStatus(id, status);
+    }
+
     @DeleteMapping("/{id}")
     public Result delete(@PathVariable("id") Long id) {
         return knowledgeBaseService.remove(id);
@@ -54,9 +60,15 @@ public class KnowledgeBaseController {
         return kbDocumentService.upload(kbId, form);
     }
 
-    /** 列出某知识库下的文档(带处理状态,供前端轮询进度) */
+    /** 列出某知识库下的文档(带处理状态,供前端轮询进度;不含 content 大字段) */
     @GetMapping("/{kbId}/documents")
     public Result listDocuments(@PathVariable("kbId") Long kbId) {
         return kbDocumentService.listByKb(kbId);
+    }
+
+    /** 查看单篇文档详情(含 content 原文) */
+    @GetMapping("/documents/{docId}")
+    public Result documentDetail(@PathVariable("docId") Long docId) {
+        return kbDocumentService.detail(docId);
     }
 }

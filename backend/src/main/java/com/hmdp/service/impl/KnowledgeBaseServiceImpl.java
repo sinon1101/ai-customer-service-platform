@@ -10,6 +10,7 @@ import com.hmdp.mapper.KnowledgeBaseMapper;
 import com.hmdp.service.IKnowledgeBaseService;
 import org.springframework.stereotype.Service;
 
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -70,6 +71,20 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KnowledgeBaseMapper, K
     }
 
     @Override
+    public Result setStatus(Long id, Integer status) {
+        if (status == null || (status != 0 && status != 1)) {
+            return Result.fail("状态非法");
+        }
+        KnowledgeBase kb = getOwned(id);
+        if (kb == null) {
+            return Result.fail("知识库不存在");
+        }
+        kb.setStatus(status);
+        updateById(kb);
+        return Result.ok();
+    }
+
+    @Override
     public Result remove(Long id) {
         KnowledgeBase kb = getOwned(id);
         if (kb == null) {
@@ -82,6 +97,34 @@ public class KnowledgeBaseServiceImpl extends ServiceImpl<KnowledgeBaseMapper, K
     @Override
     public boolean isOwned(Long id) {
         return id != null && getOwned(id) != null;
+    }
+
+    @Override
+    public boolean isEnabled(Long id, Long tenantId) {
+        if (id == null || tenantId == null) {
+            return false;
+        }
+        Long cnt = lambdaQuery()
+                .eq(KnowledgeBase::getId, id)
+                .eq(KnowledgeBase::getTenantId, tenantId)
+                .eq(KnowledgeBase::getStatus, 1)
+                .count();
+        return cnt != null && cnt > 0;
+    }
+
+    @Override
+    public List<Long> listEnabledIds(Long tenantId) {
+        if (tenantId == null) {
+            return Collections.emptyList();
+        }
+        return lambdaQuery()
+                .select(KnowledgeBase::getId)
+                .eq(KnowledgeBase::getTenantId, tenantId)
+                .eq(KnowledgeBase::getStatus, 1)
+                .list()
+                .stream()
+                .map(KnowledgeBase::getId)
+                .toList();
     }
 
     /** 取当前租户名下的知识库,拿不到(不存在或不属于本租户)返回 null,杜绝越权 */

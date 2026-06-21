@@ -46,3 +46,11 @@ deploy/**/data/
 ### 系统文件 ###
 .DS_Store
 Thumbs.db
+
+# 本地运行日志(后端/前端 dev)
+*.log
+backend/app-*.log
+frontend-new/vite-dev.log
+
+# 个人面试备忘(不入库)
+面试准备-高频问题.md
