@@ -58,17 +58,18 @@ public class TicketServiceImpl extends ServiceImpl<TicketMapper, Ticket> impleme
         Long tenantId = visitor.getTenantId();
         String conversationId = form.getConversationId();
 
-        // 幂等:同对话已有未结束工单 → 直接返回它,避免一通转人工建出多张单
-        if (StrUtil.isNotBlank(conversationId)) {
-            Ticket existing = lambdaQuery()
-                    .eq(Ticket::getTenantId, tenantId)
-                    .eq(Ticket::getConversationId, conversationId)
-                    .in(Ticket::getStatus, TicketConstants.STATUS_WAITING, TicketConstants.STATUS_ASSIGNED)
-                    .last("LIMIT 1")
-                    .one();
-            if (existing != null) {
-                return Result.ok(existing);
-            }
+        // 幂等:同一访客只要还有未结束(WAITING/ASSIGNED)的工单就复用,不重复建单。
+        // 注意:不能只按 conversationId 判,因为访客没和 AI 对话就直接转人工时 conversationId 为空,
+        // 那样会跳过幂等、每点一次建一张新单。改按 visitorUserId,conversationId 有无都能正确去重。
+        Ticket existing = lambdaQuery()
+                .eq(Ticket::getTenantId, tenantId)
+                .eq(Ticket::getVisitorUserId, visitor.getId())
+                .in(Ticket::getStatus, TicketConstants.STATUS_WAITING, TicketConstants.STATUS_ASSIGNED)
+                .orderByDesc(Ticket::getCreateTime)
+                .last("LIMIT 1")
+                .one();
+        if (existing != null) {
+            return Result.ok(existing);
         }
 
         String reason = StrUtil.isNotBlank(form.getReason()) ? form.getReason() : TicketConstants.REASON_USER_REQUEST;
