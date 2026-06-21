@@ -184,7 +184,10 @@ async function onTransfer() {
     })
     ticketId.value = ticket.id
     humanVisible.value = true
-    ElMessage.success(`已转人工,工单 #${ticket.id},等待坐席接入`)
+    // 转人工幂等:同对话已有工单会直接返回它,故文案需按真实状态区分(可能坐席已接入)
+    ElMessage.success(ticket.status === 'ASSIGNED'
+      ? `工单 #${ticket.id} 坐席已接入,继续会话`
+      : `已转人工,工单 #${ticket.id},等待坐席接入`)
   } catch {
     /* 拦截器已提示 */
   } finally {
