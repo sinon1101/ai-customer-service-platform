@@ -96,39 +96,40 @@ flowchart TB
 
 ## 🚀 快速开始
 
-### 前置条件
-- **Java 21** + Maven
-- **Docker**(中间件)
-- **百炼(DashScope)API Key**:放进系统环境变量 `API-KEY`(后端读 `spring.ai.dashscope.api-key: ${API-KEY}`)
+需要 **Docker** + **百炼(DashScope)API Key**(本地开发额外需要 Java 21 / Maven / Node)。
 
-### 1) 启动中间件
+### 方式一:全栈一键(Docker,推荐)
+
+中间件 + 后端 + 前端全部容器化,一条命令拉起:
+
 ```bash
-cd deploy
-docker compose up -d            # 全部中间件
-# 或仅 DB + Redis(多数后端工作够用):docker compose up -d mysql redis
+cp .env.example .env          # 填入 DASHSCOPE_API_KEY(百炼控制台获取)
+docker compose up -d --build  # 首次构建会下载依赖,稍慢
 ```
-端口:MySQL `127.0.0.1:3308`(库 `ai_customer_service`,root/`123456`)· Redis Stack `127.0.0.1:6381`(RedisInsight `:8001`)· RocketMQ NameServer `9876` / Dashboard `http://localhost:8089`。
 
-> 首次初始化才会自动跑 `deploy/mysql/init/*.sql`;若卷已存在,手动应用:
-> `docker exec -i aics-mysql mysql -uroot -p123456 ai_customer_service < deploy/mysql/init/01-schema.sql`
+打开 **http://localhost:8080**,用 `acme_admin` / `123456` 登录即可。`docker compose down` 停止(加 `-v` 连数据卷清空)。
 
-### 2) 启动后端(端口 8081)
+> 全新数据卷首次启动会自动建表 + 灌入 demo 租户/账号(`deploy/mysql/init/01~03.sql`),开箱即用。
+
+### 方式二:本地开发(后端/前端跑宿主机,热重载)
+
 ```bash
-cd backend
-mvn clean package -DskipTests
-# 用 PowerShell 启动,让 JVM 继承用户级、带连字符的 API-KEY 环境变量
+# 1) 仅中间件
+cd deploy && docker compose up -d
+# 端口:MySQL :3308(库 ai_customer_service,root/123456)· Redis Stack :6381(RedisInsight :8001)· RocketMQ :9876 / Dashboard :8089
+
+# 2) 后端(:8081)—— 用 PowerShell 启动,继承用户级、带连字符的 API-KEY 环境变量
+cd backend && mvn clean package -DskipTests
 java -jar target/hm-dianping-0.0.1-SNAPSHOT.jar
+
+# 3) 前端(:5173)—— Vite 代理 /api(去前缀)+ /ws 到后端
+cd frontend-new && npm install && npm run dev
 ```
 
-### 3) 启动前端(端口 5173)
-```bash
-cd frontend-new
-npm install
-npm run dev     # 代理 /api(去前缀)+ /ws 到后端 :8081
-```
+> 两种方式勿同时启动(中间件端口会撞)。方式二的 API Key 走系统环境变量 `API-KEY`,方式一走 `.env` 的 `DASHSCOPE_API_KEY`,后端配置 `${DASHSCOPE_API_KEY:${API-KEY:}}` 两者兼容。
 
-### Demo 账号(本地 DB)
-`acme_admin` / `globex_admin`(密码 `123456`,分属租户 `acme` / `globex`);坐席 `acme_agent1` / `acme_agent2`。
+### Demo 账号
+`acme_admin` / `globex_admin`(管理员,密码 `123456`,分属租户 `acme` / `globex`);坐席 `acme_agent1` / `acme_agent2`。
 
 ---
 

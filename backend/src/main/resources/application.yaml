@@ -22,8 +22,8 @@ spring:
     default-property-inclusion: non_null # JSON处理时忽略非空字段
   ai:
     dashscope:
-      # API Key 取自系统环境变量 API-KEY(百炼控制台获取)
-      api-key: ${API-KEY}
+      # API Key:容器内用 DASHSCOPE_API_KEY(deploy/.env),本机开发回退到系统环境变量 API-KEY
+      api-key: ${DASHSCOPE_API_KEY:${API-KEY:}}
       chat:
         options:
           # 模型名,后续可在此切换(qwen-plus / qwen-turbo / qwen-max ...)

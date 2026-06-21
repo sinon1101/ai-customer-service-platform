@@ -1,0 +1,136 @@
+# AI 智能客服平台 — 全栈一键启动(中间件 + 后端 + 前端)
+#
+# 用法(在仓库根目录):
+#   1) 准备 .env(放百炼 API Key):  cp .env.example .env  然后填入 DASHSCOPE_API_KEY
+#   2) 一键拉起:                    docker compose up -d --build
+#   3) 访问前端:                    http://localhost:8080
+#      Demo 账号:acme_admin / globex_admin(密码 123456)
+#   4) 停止:                        docker compose down      (加 -v 连数据卷一起清)
+#
+# 说明:这是「全容器化」入口,后端/前端都在容器里;开发时若想后端跑宿主机热重载,
+#       用 deploy/docker-compose.yml(仅中间件)。两者勿同时启动(端口会撞)。
+#
+# 项目名固定为 aics(否则默认取目录名 hm-dianping 这个遗留名)。
+# 数据卷复用开发栈(deploy/)已有的 deploy_* 卷,两种启动方式共享同一份数据。
+
+name: aics
+
+services:
+  # ───────────────────────── MySQL ─────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: aics-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: "ai_customer_service"
+      TZ: Asia/Shanghai
+    ports:
+      - "3308:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 首次启动(空卷)自动执行:01 建表 → 02 工单表 → 03 demo 种子数据
+      - ./deploy/mysql/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────── Redis Stack(缓存 + 向量库)───────────────────
+  redis:
+    image: redis/redis-stack:latest
+    container_name: aics-redis
+    restart: unless-stopped
+    ports:
+      - "6381:6379"
+      - "8001:8001"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────── RocketMQ NameServer ───────────────────
+  rmq-namesrv:
+    image: apache/rocketmq:5.3.0
+    container_name: aics-rmq-namesrv
+    restart: unless-stopped
+    ports:
+      - "9876:9876"
+    environment:
+      JAVA_OPT_EXT: "-server -Xms256m -Xmx256m -Xmn128m"
+    command: sh mqnamesrv
+
+  # ─────────────────── RocketMQ Broker ───────────────────
+  rmq-broker:
+    image: apache/rocketmq:5.3.0
+    container_name: aics-rmq-broker
+    restart: unless-stopped
+    user: root
+    depends_on:
+      - rmq-namesrv
+    ports:
+      - "10909:10909"
+      - "10911:10911"
+      - "10912:10912"
+    environment:
+      JAVA_OPT_EXT: "-server -Xms512m -Xmx512m -Xmn256m"
+    volumes:
+      # 全容器化用 broker-docker.conf:brokerIP1=rmq-broker,后端容器经服务名可达
+      - ./deploy/rocketmq/broker-docker.conf:/home/rocketmq/rocketmq-5.3.0/conf/broker.conf
+      - rmq-broker-store:/home/rocketmq/store
+    command: sh mqbroker -c /home/rocketmq/rocketmq-5.3.0/conf/broker.conf -n rmq-namesrv:9876
+
+  # ─────────────────── 后端(Spring Boot)───────────────────
+  backend:
+    build:
+      context: ./backend
+    image: aics-backend:latest
+    container_name: aics-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rmq-namesrv:
+        condition: service_started
+      rmq-broker:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      # 百炼 API Key:从根目录 .env 注入(application.yaml 读 ${DASHSCOPE_API_KEY})
+      DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:?请在 .env 设置 DASHSCOPE_API_KEY(百炼控制台获取)}"
+    ports:
+      - "8081:8081"
+
+  # ─────────────────── 前端(Vite 构建 + nginx)───────────────────
+  frontend:
+    build:
+      context: ./frontend-new
+    image: aics-frontend:latest
+    container_name: aics-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"   # 浏览器访问 http://localhost:8080
+
+# 复用开发栈已有的数据卷(deploy/ 项目创建的 deploy_* 卷),不另起新卷
+volumes:
+  mysql-data:
+    external: true
+    name: deploy_mysql-data
+  redis-data:
+    external: true
+    name: deploy_redis-data
+  rmq-broker-store:
+    external: true
+    name: deploy_rmq-broker-store

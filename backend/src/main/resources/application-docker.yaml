@@ -1,0 +1,12 @@
+# 容器化部署 profile(SPRING_PROFILES_ACTIVE=docker 时叠加在 application.yaml 之上)。
+# 唯一作用:把中间件地址从「宿主机端口」改为「compose 网络里的服务名 + 容器内端口」。
+spring:
+  datasource:
+    url: jdbc:mysql://mysql:3306/ai_customer_service?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useUnicode=true&characterEncoding=utf8
+  data:
+    redis:
+      host: redis
+      port: 6379
+# RocketMQ NameServer 走服务名;broker 需广播容器可达地址(见 deploy/rocketmq/broker-docker.conf 的 brokerIP1=rmq-broker)
+rocketmq:
+  name-server: rmq-namesrv:9876
