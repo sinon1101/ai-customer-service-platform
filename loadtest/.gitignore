@@ -1,0 +1,6 @@
+# 压测运行产物(每次跑生成,不入库)
+*.jtl
+report/
+report-llm/
+report-iso/
+jmeter.log
