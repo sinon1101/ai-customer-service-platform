@@ -85,7 +85,8 @@ async function init(id) {
     /* 拦截器已提示 */
   }
   if (ticket.value?.status !== 'CLOSED') {
-    connect(id, { onMessage: onRealtime })
+    // 把本端视角(selfRole)告知后端,供其判定 senderRole——同一账号既当访客又当坐席时尤为关键
+    connect(id, { onMessage: onRealtime, as: props.selfRole })
   }
 }
 

@@ -13,15 +13,18 @@ export function useTicketSocket() {
   let ws = null
   let currentTicketId = null
 
-  function connect(ticketId, { onMessage } = {}) {
+  function connect(ticketId, { onMessage, as } = {}) {
     close()
     currentTicketId = ticketId
     // 注意:不在此清空 messages —— 历史消息由调用方(RealtimeSession.init)在 connect 之前
     // 用工单详情回填,connect 后只追加实时新帧。若在这里清空会把已加载的历史抹掉(重开会话丢上下文)。
 
     // 经 Vite 代理(ws:true);用当前页面 host,协议跟随 http/https
+    // as:声明本次连接的视角(VISITOR/AGENT)。Demo 里同一账号可能既是访客又是接单坐席,
+    //    后端需据此判定 senderRole,否则会一律按「访客优先」把坐席消息也标成访客。
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    const url = `${proto}://${location.host}/ws/chat?ticketId=${ticketId}&token=${encodeURIComponent(resolveToken())}`
+    const asParam = as ? `&as=${encodeURIComponent(as)}` : ''
+    const url = `${proto}://${location.host}/ws/chat?ticketId=${ticketId}&token=${encodeURIComponent(resolveToken())}${asParam}`
     ws = new WebSocket(url)
 
     ws.onopen = () => {

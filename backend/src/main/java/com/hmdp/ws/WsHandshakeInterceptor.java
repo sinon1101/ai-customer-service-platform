@@ -85,13 +85,21 @@ public class WsHandshakeInterceptor implements HandshakeInterceptor {
             return reject(response, "会话已结束");
         }
         // ③ 参与方校验:访客本人 / 接单坐席
-        String role;
-        if (user.getId().equals(ticket.getVisitorUserId())) {
-            role = TicketConstants.SENDER_VISITOR;
-        } else if (user.getId().equals(ticket.getAgentId())) {
-            role = TicketConstants.SENDER_AGENT;
-        } else {
+        boolean isVisitor = user.getId().equals(ticket.getVisitorUserId());
+        boolean isAgent = user.getId().equals(ticket.getAgentId());
+        if (!isVisitor && !isAgent) {
             return reject(response, "无权进入该会话");
+        }
+        // Demo 里同一账号可能既是访客又是接单坐席,此时仅凭身份无法区分本次连接的视角,
+        // 需由前端 as 参数声明(仅在用户确实具备该视角时采纳),否则退回「访客优先」的旧逻辑。
+        String requested = req.getParameter("as");
+        String role;
+        if (TicketConstants.SENDER_AGENT.equals(requested) && isAgent) {
+            role = TicketConstants.SENDER_AGENT;
+        } else if (TicketConstants.SENDER_VISITOR.equals(requested) && isVisitor) {
+            role = TicketConstants.SENDER_VISITOR;
+        } else {
+            role = isVisitor ? TicketConstants.SENDER_VISITOR : TicketConstants.SENDER_AGENT;
         }
 
         attributes.put(ATTR_TICKET_ID, ticketId);
