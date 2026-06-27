@@ -77,6 +77,7 @@ import { ElMessage } from 'element-plus'
 import { Service, ChatDotRound, User, Loading, WarningFilled } from '@element-plus/icons-vue'
 import { visitorApi, ticketApi } from '@/api'
 import { streamChat } from '@/api/stream'
+import { isTransferIntent } from '@/utils/intent'
 import { useVisitorStore } from '@/store/visitor'
 import RealtimeSession from '@/components/RealtimeSession.vue'
 
@@ -118,8 +119,17 @@ function onSend() {
   const text = draft.value.trim()
   if (!text || sending.value) return
   draft.value = ''
-  lastQuestion = text
   messages.push({ role: 'user', content: text })
+
+  // 自然语言转人工:命中意图直接短路 LLM,走真实建单流程(等价于点「转人工」)。
+  // 不覆盖 lastQuestion —— 留给坐席看的是上一句真实问题,而非「转人工」本身。
+  if (isTransferIntent(text)) {
+    scrollToBottom()
+    onTransfer()
+    return
+  }
+
+  lastQuestion = text
   const assistant = reactive({ role: 'assistant', content: '', degraded: false, streaming: true })
   messages.push(assistant)
   scrollToBottom()
@@ -162,6 +172,11 @@ async function onTransfer() {
     ticketId.value = ticket.id
     humanVisible.value = true
     // 转人工幂等:同对话已有工单会直接返回它,故文案需按真实状态区分(可能坐席已接入)
+    const notice = ticket.status === 'ASSIGNED'
+      ? `已为您接入人工坐席(工单 #${ticket.id}),请在弹出的会话窗口继续。`
+      : `已为您转接人工客服(工单 #${ticket.id}),正在等待坐席接入,请在弹出的窗口稍候。`
+    messages.push({ role: 'assistant', content: notice })
+    scrollToBottom()
     ElMessage.success(ticket.status === 'ASSIGNED'
       ? `工单 #${ticket.id} 坐席已接入,继续会话`
       : `已转人工,工单 #${ticket.id},等待坐席接入`)
